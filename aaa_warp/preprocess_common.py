@@ -49,25 +49,7 @@ def finish_preprocess(
             radii[i] = 0
     if radii[i] == 0:
         valid[i] = False
-        centers[i] = wp.vec2(0.0)
-        rects[i] = wp.vec2(0.0)
-        depths[i] = 0.0
-        rgb[i] = wp.vec3(0.0)
         tiles[i] = 0
-        if eval3d:
-            transforms[i] = wp.mat44(0.0)
-            opacity3d[i] = 0.0
-        else:
-            conics[i] = wp.vec4(0.0)
-            for c in range(6):
-                cov3d[i,c] = 0.0
-            if need_inverse:
-                for row in range(3):
-                    for col in range(4):
-                        inverse[i,row,col] = 0.0
-        if use_sh:
-            for c in range(3):
-                clamped[i,c] = False
         return
     valid[i] = True
     if sort_order != 0:

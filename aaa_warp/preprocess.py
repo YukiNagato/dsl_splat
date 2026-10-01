@@ -5,10 +5,12 @@ This is a forward-only diagnostic implementation, with no autograd registration.
 """
 import torch
 import warp as wp
+from .interop import current_stream
+from .dispatch import kernel_arg, launch, launch_tiled
 from .geometry import rotation_matrix
 from .preprocess3d import preprocess_3d
 from .preprocess_common import finish_preprocess
-from .cooperative_culling import cull_first_32, cull_remainder
+from .cooperative_culling import cull_first_32, cull_remainder, cull_remainder_3d
 
 
 @wp.func
@@ -34,6 +36,8 @@ def _preprocess(
     radii: wp.array(dtype=int), tiles: wp.array(dtype=int),
 ):
     i = wp.tid()
+    radii[i] = 0
+    tiles[i] = 0
     p = means[i]
     t = _transform(p, view)
     if t[2] < 0.2:
@@ -113,7 +117,7 @@ def _preprocess(
 
 @torch.no_grad()
 def preprocess(*, means3D, opacities, raster_settings, scales=None, rotations=None,
-               colors_precomp=None, shs=None, cov3D_precomp=None, filter3D=None):
+               colors_precomp=None, shs=None, cov3D_precomp=None, filter3D=None, _bindings=None):
     """Run AAA forward preprocessing and return detached, named CUDA tensors.
 
     Mirrors the supported input branches of AAA's preprocessCUDA, including 3D
@@ -121,6 +125,9 @@ def preprocess(*, means3D, opacities, raster_settings, scales=None, rotations=No
     the first 32 tiles are checked per Gaussian and the remainder is distributed
     across a 32-thread GPU block.
     Matrix and quaternion conventions match the original Python interface.
+    ``radii``, ``tiles_touched`` and ``valid`` are defined for every row.
+    Other fields are meaningful only where ``valid`` is True, as in CUDA;
+    rejected geometry/SH rows are not initialized or cleared.
     """
     wp.init()
     settings = raster_settings.settings
@@ -193,62 +200,76 @@ def preprocess(*, means3D, opacities, raster_settings, scales=None, rotations=No
     if shs is not None:
         shapes['clamped'] = (n,3)
     shapes['valid'] = (n,)
-    complete_3d = eval3d and not culling.tile_based_culling and shs is None and order == 0
-    result = {key:(torch.zeros if key == 'radii' and not complete_3d else torch.empty)(
+    cooperative = bool(settings.load_balancing and culling.tile_based_culling)
+    complete_3d = eval3d and not cooperative
+    result = {key:torch.empty(
         shape, device=device, dtype=torch.int32 if key in ('radii','tiles_touched')
         else torch.bool if key in ('clamped','valid') else torch.float32)
         for key,shape in shapes.items()}
     if n:
-        stream = wp.stream_from_torch(torch.cuda.current_stream(device))
+        stream = current_stream(device)
         refs = []
         def arr(key,dtype=wp.float32):
-            return wp.from_torch(tensors[key],dtype=dtype)
+            return kernel_arg(tensors[key],dtype,_bindings)
         def out(key,dtype=wp.float32,empty_shape=(0,)):
             if key in result:
-                return wp.from_torch(result[key],dtype=dtype)
-            t = torch.zeros(empty_shape,device=device,dtype=torch.bool if dtype==wp.bool else torch.float32)
+                return kernel_arg(result[key],dtype,_bindings)
+            t = torch.empty(empty_shape,device=device,dtype=torch.bool if dtype==wp.bool else torch.float32)
             refs.append(t)
-            return wp.from_torch(t,dtype=dtype)
+            return kernel_arg(t,dtype,_bindings)
         means,scale,rotation = arr('means',wp.vec3),arr('scales',wp.vec3),arr('rotations',wp.vec4)
         common = [out('means2D',wp.vec2),out('rects2D',wp.vec2),out('depths')]
         if eval3d:
-            wp.launch(preprocess_3d,dim=n,inputs=[means,scale,rotation,arr('opacities'),arr('colors',wp.vec3),arr('filter'),
+            queue = torch.empty(n if cooperative else 0,device=device,dtype=torch.int32)
+            queue_size = torch.zeros(1,device=device,dtype=torch.int32) if cooperative else queue
+            refs.extend((queue,queue_size))
+            queued_arg = kernel_arg(queue,bindings=_bindings)
+            queue_size_arg = kernel_arg(queue_size,bindings=_bindings)
+            launch(preprocess_3d,dim=n,inputs=[means,scale,rotation,arr('opacities'),arr('colors',wp.vec3),
+                arr('sh',wp.vec3),shs is not None,degree,order,arr('filter'),
                 filter3D is not None,arr('camera',wp.vec3),arr('view'),arr('proj'),w,h,
                 raster_settings.tanfovx,raster_settings.tanfovy,raster_settings.scale_modifier,
                 settings.proper_ewa_scaling,getattr(settings,'new_aabb',True),getattr(settings,'near_clipping',False),
-                complete_3d],
+                culling.tile_based_culling,complete_3d,cooperative],
                 outputs=common+[out('gauss2screen',wp.mat44),out('opacity'),out('radii',wp.int32),
-                                out('tiles_touched',wp.int32),out('rgb',wp.vec3),out('valid',wp.bool)],
-                block_dim=32,stream=stream)
+                                out('tiles_touched',wp.int32),out('rgb',wp.vec3),out('valid',wp.bool),
+                                out('clamped',wp.bool,(0,3)),queued_arg,queue_size_arg],
+                block_dim=32,stream=stream,bindings=_bindings)
         else:
-            wp.launch(_preprocess,dim=n,inputs=[means,scale,rotation,arr('opacities'),arr('cov'),cov3D_precomp is not None,
+            launch(_preprocess,dim=n,inputs=[means,scale,rotation,arr('opacities'),arr('cov'),cov3D_precomp is not None,
                 arr('view'),arr('proj'),w,h,raster_settings.tanfovx,raster_settings.tanfovy,raster_settings.scale_modifier,
                 settings.proper_ewa_scaling,culling.rect_bounding,culling.tight_opacity_bounding],
-                outputs=common+[out('cov3D'),out('conic_opacity',wp.vec4),out('rgb',wp.vec3),out('radii',wp.int32),out('tiles_touched',wp.int32)],stream=stream)
-        cooperative = bool(settings.load_balancing and culling.tile_based_culling)
-        if cooperative:
+                outputs=common+[out('cov3D'),out('conic_opacity',wp.vec4),out('rgb',wp.vec3),out('radii',wp.int32),out('tiles_touched',wp.int32)],stream=stream,bindings=_bindings)
+        if cooperative and eval3d:
+            remainder_blocks = min(n,1024)
+            launch_tiled(cull_remainder_3d,dim=remainder_blocks,
+                         inputs=[out('means2D',wp.vec2),out('rects2D',wp.vec2),
+                                 out('gauss2screen',wp.mat44),out('opacity'),w,h,remainder_blocks],
+                         outputs=[out('radii',wp.int32),out('tiles_touched',wp.int32),
+                                  out('valid',wp.bool),queued_arg,queue_size_arg],
+                         block_dim=32,stream=stream,bindings=_bindings)
+        elif cooperative:
             queue = torch.empty(n, device=device, dtype=torch.int32)
             queue_size = torch.zeros(1, device=device, dtype=torch.int32)
             refs.extend((queue, queue_size))
             culling_inputs = [out('means2D',wp.vec2), out('rects2D',wp.vec2),
-                # Both layouts are passed by value to the shared predicate, so
-                # even the inactive mode needs readable storage for every row.
-                out('conic_opacity',wp.vec4,(n,4)), out('gauss2screen',wp.mat44,(n,4,4)),
-                out('opacity',empty_shape=(n,)), eval3d, w, h]
+                # The predicate loads only the active geometry layout.
+                out('conic_opacity',wp.vec4,(0,4)), out('gauss2screen',wp.mat44,(0,4,4)),
+                out('opacity'), eval3d, w, h]
             culling_outputs = [out('radii',wp.int32), out('tiles_touched',wp.int32),
-                wp.from_torch(queue), wp.from_torch(queue_size)]
-            wp.launch(cull_first_32, dim=n, inputs=culling_inputs,
-                      outputs=culling_outputs, stream=stream)
+                kernel_arg(queue,bindings=_bindings), kernel_arg(queue_size,bindings=_bindings)]
+            launch(cull_first_32, dim=n, inputs=culling_inputs,
+                      outputs=culling_outputs, stream=stream,bindings=_bindings)
             remainder_blocks = min(n, 32768)
-            wp.launch_tiled(cull_remainder, dim=remainder_blocks,
+            launch_tiled(cull_remainder, dim=remainder_blocks,
                             inputs=culling_inputs+[remainder_blocks],
-                            outputs=culling_outputs, block_dim=32, stream=stream)
-        if not complete_3d:
-            wp.launch(finish_preprocess,dim=n,inputs=[means,scale,rotation,arr('camera',wp.vec3),arr('colors',wp.vec3),
+                            outputs=culling_outputs, block_dim=32, stream=stream,bindings=_bindings)
+        if not eval3d:
+            launch(finish_preprocess,dim=n,inputs=[means,scale,rotation,arr('camera',wp.vec3),arr('colors',wp.vec3),
                 arr('sh',wp.vec3),shs is not None,degree,raster_settings.scale_modifier,order,need_inverse,eval3d,
                 culling.tile_based_culling and not cooperative,w,h,out('means2D',wp.vec2),out('rects2D',wp.vec2),
                 out('conic_opacity',wp.vec4,(0,4)),out('gauss2screen',wp.mat44,(0,4,4)),out('opacity'),
                 out('cov3D',empty_shape=(0,6))],
                 outputs=[out('depths'),out('rgb',wp.vec3),out('clamped',wp.bool,(0,3)),out('cov3D_inv',wp.float32,(0,3,4)),
-                         out('radii',wp.int32),out('tiles_touched',wp.int32),out('valid',wp.bool)],stream=stream)
+                         out('radii',wp.int32),out('tiles_touched',wp.int32),out('valid',wp.bool)],stream=stream,bindings=_bindings)
     return result
