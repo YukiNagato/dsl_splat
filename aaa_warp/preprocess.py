@@ -147,7 +147,9 @@ def preprocess(*, means3D, opacities, raster_settings, scales=None, rotations=No
             raise ValueError(f'{name} must be float32 on {device}')
         if tuple(value.shape) != shape:
             raise ValueError(f'{name} must have shape {shape}')
-        return value.detach().contiguous()
+        # This function runs under no_grad, and kernel_arg explicitly disables
+        # Warp gradients. Avoid an extra Tensor view for already-contiguous inputs.
+        return value.contiguous()
     def optional(name, value, shape):
         # Empty arrays are never accessed by inactive branches.
         return torch.empty((0,)+shape[1:],device=device) if value is None else check(name,value,shape)
@@ -207,7 +209,7 @@ def preprocess(*, means3D, opacities, raster_settings, scales=None, rotations=No
         else torch.bool if key in ('clamped','valid') else torch.float32)
         for key,shape in shapes.items()}
     if n:
-        stream = current_stream(device)
+        stream = current_stream(device, bindings=_bindings)
         refs = []
         def arr(key,dtype=wp.float32):
             return kernel_arg(tensors[key],dtype,_bindings)

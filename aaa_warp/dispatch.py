@@ -1,6 +1,6 @@
-"""Frame-local Torch descriptors for forward kernel arguments.
+"""Phase-local Torch descriptors for forward or backward kernel arguments.
 
-Descriptors alias Torch storage and keep tensor owners for one forward. Cached
+Descriptors alias Torch storage and keep tensor owners for one phase. Cached
 launches retain only host packets, rebound before use; scan/radix utilities
 still use wp.array.
 """
@@ -11,10 +11,16 @@ import warp as wp
 
 
 class FrameBindings:
-    """Reuse descriptors for identical Tensor objects within one forward."""
+    """Reuse Tensor descriptors and stream wrappers within one execution phase.
+
+    Each forward and backward creates its own bindings. Every new Tensor is
+    bound to its current data pointer through Warp's validated conversion.
+    Keeping owners on the live descriptors prevents Tensor-id reuse.
+    """
     def __init__(self, launch_cache=None):
         self.launch_cache = launch_cache
         self._descriptors = {}
+        self._streams = {}
 
     def array(self, tensor, dtype=None):
         if dtype is None:
@@ -23,7 +29,7 @@ class FrameBindings:
         value = self._descriptors.get(key)
         if value is None:
             value = wp.from_torch(tensor, dtype=dtype, requires_grad=False, return_ctype=True)
-            # from_torch's descriptor retains tensor as _ref, preventing id reuse.
+            # The descriptor retains tensor as _ref, preventing id reuse.
             self._descriptors[key] = value
         return value
 

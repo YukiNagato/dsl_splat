@@ -150,7 +150,6 @@ def _duplicate(
         values[j] = -1
 
 
-
 def _uses_aaa_default_duplicate(settings):
     # Only flags affecting this stage select its specialization. EWA, bounds,
     # HIER queues and 4x4 culling are still handled by their respective stages.
@@ -209,68 +208,7 @@ def _duplicate_inputs(preprocessed, raster_settings, offsets, bindings=None):
             bool(settings.load_balancing),int(settings.sort_settings.sort_order)]
 
 
-@wp.kernel(enable_backward=False)
-def _initialize_fixed(offsets: wp.array(dtype=int), n: int,
-                       keys: wp.array(dtype=wp.uint64), values: wp.array(dtype=int),
-                       ranges: wp.array2d(dtype=int), pair_count: wp.array(dtype=int)):
-    i = wp.tid()
-    if i < keys.shape[0]:
-        keys[i] = wp.uint64(-1)
-        values[i] = -1
-    if i < ranges.shape[0]:
-        ranges[i,0] = 0
-        ranges[i,1] = 0
-    if i == 0:
-        total = int(0)
-        if n:
-            total = offsets[n-1]
-        pair_count[0] = total
 
-
-class _FixedBinning:
-    """Capture-compatible storage; callers must check pair_count for overflow.
-
-    Writes are bounded even on overflow. Padded keys sort after every valid
-    tile. The renderer sees only ranges for the materialized prefix until
-    its caller grows this workspace and reruns the complete forward.
-    """
-    def __init__(self, n, raster_settings, device, capacity):
-        self.capacity = capacity
-        self.n = n
-        tile_count = ((raster_settings.image_width+15)//16) * ((raster_settings.image_height+15)//16)
-        self.offsets = torch.empty(n, dtype=torch.int32, device=device)
-        self.keys = torch.empty(2*capacity, dtype=torch.int64, device=device)
-        self.values = torch.empty(2*capacity, dtype=torch.int32, device=device)
-        self.ranges = torch.empty((tile_count,2), dtype=torch.int32, device=device)
-        self.pair_count = torch.empty(1, dtype=torch.int32, device=device)
-        self.result = {'point_list': self.values[:capacity], 'ranges': self.ranges}
-        self._offsets = wp.from_torch(self.offsets)
-        self._keys = wp.from_torch(self.keys, dtype=wp.uint64)
-        self._values = wp.from_torch(self.values)
-        self._prefix_keys = wp.from_torch(self.keys[:capacity], dtype=wp.uint64)
-        self._prefix_values = wp.from_torch(self.values[:capacity])
-        self._ranges = wp.from_torch(self.ranges)
-        self._count = wp.from_torch(self.pair_count)
-        self._end_bit = 32+tile_count.bit_length()
-
-    def launch(self, preprocessed, raster_settings):
-        stream = current_stream(self.offsets.device)
-        with wp.ScopedStream(stream, sync_enter=False):
-            if self.n:
-                wp.utils.array_scan(wp.from_torch(preprocessed['tiles_touched']), self._offsets)
-            wp.launch(_initialize_fixed, dim=max(1,self.capacity,self.ranges.shape[0]),
-                      inputs=[self._offsets,self.n],
-                      outputs=[self._prefix_keys,self._prefix_values,self._ranges,self._count],
-                      stream=stream)
-            if self.capacity:
-                if self.n:
-                    kernel, inputs, block_dim = _duplicate_launch(preprocessed,raster_settings,self.offsets)
-                    wp.launch(kernel, dim=duplicate_dim(kernel,self.n), inputs=inputs, block_dim=block_dim,
-                              outputs=[self._prefix_keys,self._prefix_values],stream=stream)
-                wp.utils.radix_sort_pairs(self._keys,self._values,self.capacity,end_bit=self._end_bit)
-                wp.launch(_identify_ranges,dim=self.capacity,inputs=[self._prefix_keys],
-                          outputs=[self._ranges],stream=stream)
-        return self.result
 
 
 @torch.no_grad()
@@ -288,7 +226,7 @@ def bin_and_sort(preprocessed, raster_settings, *, diagnostics=True, _bindings=N
     width,height = raster_settings.image_width,raster_settings.image_height
     gx,gy = (width+15)//16,(height+15)//16
     offsets = torch.empty((n,),dtype=torch.int32,device=device)
-    stream = current_stream(device)
+    stream = current_stream(device, bindings=_bindings)
     if n:
         with wp.ScopedStream(stream, sync_enter=False):
             wp.utils.array_scan(wp.from_torch(preprocessed['tiles_touched']),wp.from_torch(offsets))
