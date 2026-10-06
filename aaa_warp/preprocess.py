@@ -117,7 +117,8 @@ def _preprocess(
 
 @torch.no_grad()
 def preprocess(*, means3D, opacities, raster_settings, scales=None, rotations=None,
-               colors_precomp=None, shs=None, cov3D_precomp=None, filter3D=None, features=None, _bindings=None):
+               colors_precomp=None, shs=None, cov3D_precomp=None, filter3D=None, features=None,
+               principal_point=None, _bindings=None):
     """Run AAA forward preprocessing and return detached, named CUDA tensors.
 
     Mirrors the supported input branches of AAA's preprocessCUDA, including 3D
@@ -131,6 +132,9 @@ def preprocess(*, means3D, opacities, raster_settings, scales=None, rotations=No
     ``features`` aliases ``colors_precomp`` and accepts (N,C), C > 0. The
     legacy result key ``rgb`` contains these contiguous features directly
     (aliasing input storage when contiguous); SH generates a fresh (N,3) array.
+    ``principal_point=(cx,cy)`` extends AAA's view-plane bounds to off-center
+    pinhole cameras. It must match the projection matrix. The default retains
+    the reference's centered-camera arithmetic.
     """
     wp.init()
     if features is not None:
@@ -201,6 +205,7 @@ def preprocess(*, means3D, opacities, raster_settings, scales=None, rotations=No
         'camera': check('campos',raster_settings.campos,(3,)).reshape(1,3),
     }
     w,h = raster_settings.image_width,raster_settings.image_height
+    cx,cy = (w/2.0,h/2.0) if principal_point is None else principal_point
     if w <= 0 or h <= 0 or raster_settings.tanfovx <= 0 or raster_settings.tanfovy <= 0:
         raise ValueError('image dimensions and field of view tangents must be positive')
     if raster_settings.scale_modifier <= 0:
@@ -246,7 +251,7 @@ def preprocess(*, means3D, opacities, raster_settings, scales=None, rotations=No
             launch(preprocess_3d,dim=n,inputs=[means,scale,rotation,arr('opacities'),
                 arr('sh',wp.vec3),shs is not None,degree,order,arr('filter'),
                 filter3D is not None,arr('camera',wp.vec3),arr('view'),arr('proj'),w,h,
-                raster_settings.tanfovx,raster_settings.tanfovy,raster_settings.scale_modifier,
+                raster_settings.tanfovx,raster_settings.tanfovy,cx,cy,raster_settings.scale_modifier,
                 settings.proper_ewa_scaling,getattr(settings,'new_aabb',True),getattr(settings,'near_clipping',False),
                 culling.tile_based_culling,complete_3d,cooperative],
                 outputs=common+[out('gauss2screen',wp.mat44),out('opacity'),out('radii',wp.int32),

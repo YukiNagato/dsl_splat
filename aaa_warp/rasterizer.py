@@ -54,6 +54,7 @@ class GaussianRasterizer(torch.nn.Module):
         raster_settings=None,
         return_aux=False,
         features=None,
+        _stage_options=None,
     ):
         config = (
             raster_settings if raster_settings is not None else self.raster_settings
@@ -129,13 +130,31 @@ class GaussianRasterizer(torch.nn.Module):
                     "backward supports the native and Python/Warp hierarchical renderers"
                 )
             output = rasterize_with_grad(
-                inputs, means2D, config, self._renderer, self._launch_cache
+                inputs,
+                means2D,
+                config,
+                self._renderer,
+                self._launch_cache,
+                _stage_options,
             )
             if return_aux:
                 return output
             return output["color"], output["radii"]
-        bindings = FrameBindings(self._launch_cache)
-        state = preprocess(**inputs, raster_settings=config, _bindings=bindings)
+        options = {} if _stage_options is None else _stage_options
+        bindings = options.get("bindings") or FrameBindings(self._launch_cache)
+        state = options.get("preprocessed")
+        if state is None:
+            state = preprocess(
+                **inputs,
+                raster_settings=config,
+                principal_point=options.get("principal_point"),
+                _bindings=bindings,
+            )
+        if _stage_options is not None and "preprocessed" not in options:
+            from .autograd import _stage_options as apply_stage_options
+
+            with torch.no_grad():
+                apply_stage_options(state, _stage_options)
         bins = bin_and_sort(state, config, diagnostics=False, _bindings=bindings)
         output = self._renderer(state, bins, config, _bindings=bindings)
         if state["radii"].numel() == 0:

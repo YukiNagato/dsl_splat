@@ -12,14 +12,15 @@ import warp as wp
 from .backward_intrinsics import global_atomic_add
 from .dispatch import kernel_arg, launch
 from .interop import current_stream, contiguous_features
-from .render_adjoint import RenderAdjoint, accumulate_ray_gradient
+from .render_adjoint import RenderAdjoint, _make_accumulate_ray_gradient
 from .render_hierarchical_warp import INF, _pixel_type, _make_evaluation
 
 
 @cache
-def _make_blend_backward(channels):
+def _make_blend_backward(channels, screen_grad=False, absgrad=False):
     Pixel = _pixel_type(channels)
     feature_type = wp.types.vector(channels, wp.float32)
+    accumulate_ray_gradient = _make_accumulate_ray_gradient(screen_grad, absgrad)
 
     @wp.func
     def blend_backward(pixel: Pixel, colors: wp.array(dtype=feature_type)):
@@ -66,9 +67,11 @@ def _make_blend_backward(channels):
 
 
 @cache
-def _make_backward(cull, channels=3):
+def _make_backward(cull, channels=3, screen_grad=False, absgrad=False):
     feature_type = wp.types.vector(channels, wp.float32)
-    evaluate = _make_evaluation(cull, _make_blend_backward(channels), True, channels)
+    evaluate = _make_evaluation(
+        cull, _make_blend_backward(channels, screen_grad, absgrad), True, channels
+    )
 
     @wp.kernel(
         module="unique",
@@ -92,6 +95,8 @@ def _make_backward(cull, channels=3):
         transform_gradient: wp.array(dtype=float),
         opacity_gradient: wp.array(dtype=float),
         color_gradient: wp.array(dtype=float),
+        screen_gradient: wp.array(dtype=float),
+        screen_abs_gradient: wp.array(dtype=float),
     ):
         # Build the view on-device; host arrays use forward's direct descriptors.
         adjoint = RenderAdjoint()
@@ -102,6 +107,8 @@ def _make_backward(cull, channels=3):
         adjoint.transform_gradient = transform_gradient
         adjoint.opacity_gradient = opacity_gradient
         adjoint.color_gradient = color_gradient
+        adjoint.screen_gradient = screen_gradient
+        adjoint.screen_abs_gradient = screen_abs_gradient
         evaluate(
             wp.tid(),
             width,
@@ -123,13 +130,24 @@ def _make_backward(cull, channels=3):
 
 @torch.no_grad()
 def backward_render(
-    preprocessed, bins, output, grad_color, raster_settings, *, _bindings=None
+    preprocessed,
+    bins,
+    output,
+    grad_color,
+    raster_settings,
+    *,
+    screen_grad=False,
+    absgrad=False,
+    _bindings=None,
 ):
     """Return dFeatures, dOpacity and transposed transform gradients.
 
     The legacy ``rgb`` gradient key has shape (N,C).
     The matrix gradient has CUDA's backward buffer layout, i.e. transpose it
     to obtain the ordinary derivative w.r.t. the forward row-major matrix.
+    ``screen_grad`` adds (N,2) rigid footprint translation derivatives in pixel
+    units; ``absgrad`` adds their componentwise absolute per-pixel sums. These
+    optional statistics share the replay, without changing model gradients.
     """
     wp.init()
     if (
@@ -151,14 +169,26 @@ def backward_render(
         or grad_color.dtype != torch.float32
     ):
         raise ValueError("grad_color must be float32 (C,H,W) on the rendering device")
-    # Three disjoint contiguous views share one zero-initialized allocation.
+    # Disjoint contiguous views share one zero-initialized allocation.
     # All atomic destinations still start at zero, with one fill submission.
-    storage = torch.zeros(n * (17 + channels), device=device, dtype=torch.float32)
+    if absgrad and not screen_grad:
+        raise ValueError("absgrad requires screen_grad=True")
+    screen_channels = 2 * (int(screen_grad) + int(absgrad))
+    storage = torch.zeros(
+        n * (17 + channels + screen_channels), device=device, dtype=torch.float32
+    )
+    opacity_end = n * (17 + channels)
     gradients = dict(
         gauss2screen=storage[: n * 16].view(n, 4, 4),
         rgb=storage[n * 16 : n * (16 + channels)].view(n, channels),
-        opacity=storage[n * (16 + channels) :],
+        opacity=storage[n * (16 + channels) : opacity_end],
     )
+    screen = storage[opacity_end : opacity_end + n * 2] if screen_grad else storage[:0]
+    screen_abs = storage[opacity_end + n * 2 :] if absgrad else storage[:0]
+    if screen_grad:
+        gradients["means2D"] = screen.view(n, 2)
+    if absgrad:
+        gradients["means2D_abs"] = screen_abs.view(n, 2)
     if n == 0:
         return gradients
     transforms = preprocessed["gauss2screen"].contiguous()
@@ -172,6 +202,8 @@ def backward_render(
     kernel = _make_backward(
         bool(raster_settings.settings.culling_settings.hierarchical_4x4_culling),
         channels,
+        screen_grad,
+        absgrad,
     )
     launch(
         kernel,
@@ -197,6 +229,8 @@ def backward_render(
             arg(gradients["gauss2screen"].view(-1)),
             arg(gradients["opacity"]),
             arg(gradients["rgb"].view(-1)),
+            arg(screen),
+            arg(screen_abs),
         ],
         block_dim=256,
         stream=current_stream(device, bindings=_bindings),

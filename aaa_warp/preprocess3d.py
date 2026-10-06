@@ -15,7 +15,8 @@ def preprocess_3d(
     use_sh: bool, degree: int, sort_order: int,
     filters: wp.array(dtype=float), has_filter: bool, camera: wp.array(dtype=wp.vec3),
     view: wp.array2d(dtype=float), proj: wp.array2d(dtype=float),
-    width: int, height: int, tanx: float, tany: float, modifier: float,
+    width: int, height: int, tanx: float, tany: float,
+    principal_x: float, principal_y: float, modifier: float,
     ewa: bool, new_aabb: bool, near_clipping: bool, tile_culling: bool, complete: bool,
     cooperative: bool,
     centers: wp.array(dtype=wp.vec2), rects: wp.array(dtype=wp.vec2),
@@ -87,8 +88,8 @@ def preprocess_3d(
         g2v[0,3] = t[0]
         g2v[1,3] = t[1]
         g2v[2,3] = t[2]
-        bx = wp.vec2(float(width)/2.0)+fx*bound_axis(g2v,t,cutoff,0)
-        by = wp.vec2(float(height)/2.0)+fy*bound_axis(g2v,t,cutoff,1)
+        bx = wp.vec2(principal_x)+fx*bound_axis(g2v,t,cutoff,0)
+        by = wp.vec2(principal_y)+fy*bound_axis(g2v,t,cutoff,1)
         center = wp.vec2((bx[1]+bx[0])/2.0,(by[1]+by[0])/2.0)
         extent = wp.vec2((bx[1]-bx[0])/2.0,(by[1]-by[0])/2.0)
     else:
