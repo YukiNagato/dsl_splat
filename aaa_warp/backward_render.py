@@ -4,58 +4,71 @@ No per-pixel Gaussian history is stored. CUDA's front-to-back derivative uses
 the saved final image/transmittance and the same blending sequence.
 """
 
+from functools import cache
+
 import torch
 import warp as wp
 
 from .backward_intrinsics import global_atomic_add
 from .dispatch import kernel_arg, launch
-from .interop import current_stream
+from .interop import current_stream, contiguous_features
 from .render_adjoint import RenderAdjoint, accumulate_ray_gradient
-from .render_hierarchical_warp import Pixel, INF, _make_evaluation
+from .render_hierarchical_warp import INF, _pixel_type, _make_evaluation
 
 
-@wp.func
-def blend_backward(pixel: Pixel, colors: wp.array(dtype=wp.vec3)):
-    p = pixel
-    p.head_count -= 1
-    if p.active:
-        alpha = p.head_alphas[0]
-        next_t = p.transmittance * (1.0 - alpha)
-        if next_t < 0.0001:
-            p.active = False
-        else:
-            id = p.head_ids[0]
-            rgb = colors[id]
-            alpha_gradient = float(0.0)
-            weight = alpha * p.transmittance
-            for channel in range(3):
-                ch = wp.static(channel)
-                p.color[ch] = p.color[ch] + rgb[ch] * alpha * p.transmittance
-                behind = (p.final_color[ch] - p.color[ch]) / next_t
-                alpha_gradient += (rgb[ch] - behind) * p.gradient[ch]
-                global_atomic_add(
-                    p.adjoint.color_gradient, id * 3 + ch, weight * p.gradient[ch]
+@cache
+def _make_blend_backward(channels):
+    Pixel = _pixel_type(channels)
+    feature_type = wp.types.vector(channels, wp.float32)
+
+    @wp.func
+    def blend_backward(pixel: Pixel, colors: wp.array(dtype=feature_type)):
+        p = pixel
+        p.head_count -= 1
+        if p.active:
+            alpha = p.head_alphas[0]
+            next_t = p.transmittance * (1.0 - alpha)
+            if next_t < 0.0001:
+                p.active = False
+            else:
+                id = p.head_ids[0]
+                rgb = colors[id]
+                alpha_gradient = float(0.0)
+                weight = alpha * p.transmittance
+                for channel in range(wp.static(channels)):
+                    ch = wp.static(channel)
+                    p.color[ch] = p.color[ch] + rgb[ch] * alpha * p.transmittance
+                    behind = (p.final_color[ch] - p.color[ch]) / next_t
+                    alpha_gradient += (rgb[ch] - behind) * p.gradient[ch]
+                    global_atomic_add(
+                        p.adjoint.color_gradient,
+                        id * wp.static(channels) + ch,
+                        weight * p.gradient[ch],
+                    )
+                alpha_gradient *= p.transmittance
+                alpha_gradient += (
+                    -p.final_transmittance / (1.0 - alpha)
+                ) * p.background_gradient
+                accumulate_ray_gradient(
+                    p.adjoint, id, p.x, p.y, p.head_gaussians[0], alpha_gradient
                 )
-            alpha_gradient *= p.transmittance
-            alpha_gradient += (
-                -p.final_transmittance / (1.0 - alpha)
-            ) * p.background_gradient
-            accumulate_ray_gradient(
-                p.adjoint, id, p.x, p.y, p.head_gaussians[0], alpha_gradient
-            )
-            p.transmittance = next_t
-            for index in range(1, 4):
-                j = wp.static(index)
-                p.head_depths[j - 1] = p.head_depths[j]
-                p.head_alphas[j - 1] = p.head_alphas[j]
-                p.head_ids[j - 1] = p.head_ids[j]
-                p.head_gaussians[j - 1] = p.head_gaussians[j]
-            p.head_depths[3] = INF
-    return p
+                p.transmittance = next_t
+                for index in range(1, 4):
+                    j = wp.static(index)
+                    p.head_depths[j - 1] = p.head_depths[j]
+                    p.head_alphas[j - 1] = p.head_alphas[j]
+                    p.head_ids[j - 1] = p.head_ids[j]
+                    p.head_gaussians[j - 1] = p.head_gaussians[j]
+                p.head_depths[3] = INF
+        return p
+
+    return blend_backward
 
 
-def _make_backward(cull):
-    evaluate = _make_evaluation(cull, blend_backward, True)
+@cache
+def _make_backward(cull, channels=3):
+    feature_type = wp.types.vector(channels, wp.float32)
+    evaluate = _make_evaluation(cull, _make_blend_backward(channels), True, channels)
 
     @wp.kernel(
         module="unique",
@@ -68,7 +81,7 @@ def _make_backward(cull):
         height: int,
         ranges: wp.array(dtype=int),
         points: wp.array(dtype=int),
-        colors: wp.array(dtype=wp.vec3),
+        colors: wp.array(dtype=feature_type),
         final_color: wp.array(dtype=float),
         final_t: wp.array(dtype=float),
         contributors: wp.array(dtype=int),
@@ -108,16 +121,13 @@ def _make_backward(cull):
     return replay
 
 
-_backward_cull = _make_backward(True)
-_backward_unculled = _make_backward(False)
-
-
 @torch.no_grad()
 def backward_render(
     preprocessed, bins, output, grad_color, raster_settings, *, _bindings=None
 ):
-    """Return dRGB, dOpacity and CUDA-layout (transposed) transform gradients.
+    """Return dFeatures, dOpacity and transposed transform gradients.
 
+    The legacy ``rgb`` gradient key has shape (N,C).
     The matrix gradient has CUDA's backward buffer layout, i.e. transpose it
     to obtain the ordinary derivative w.r.t. the forward row-major matrix.
     """
@@ -133,20 +143,21 @@ def backward_render(
         raise ValueError("backward requires HIER 64/8/4")
     n = preprocessed["radii"].numel()
     device = preprocessed["radii"].device
+    channels = preprocessed["rgb"].shape[1]
     if (
         grad_color.shape
-        != (3, raster_settings.image_height, raster_settings.image_width)
+        != (channels, raster_settings.image_height, raster_settings.image_width)
         or grad_color.device != device
         or grad_color.dtype != torch.float32
     ):
-        raise ValueError("grad_color must be float32 (3,H,W) on the rendering device")
+        raise ValueError("grad_color must be float32 (C,H,W) on the rendering device")
     # Three disjoint contiguous views share one zero-initialized allocation.
     # All atomic destinations still start at zero, with one fill submission.
-    storage = torch.zeros(n * 20, device=device, dtype=torch.float32)
+    storage = torch.zeros(n * (17 + channels), device=device, dtype=torch.float32)
     gradients = dict(
         gauss2screen=storage[: n * 16].view(n, 4, 4),
-        rgb=storage[n * 16 : n * 19].view(n, 3),
-        opacity=storage[n * 19 :],
+        rgb=storage[n * 16 : n * (16 + channels)].view(n, channels),
+        opacity=storage[n * (16 + channels) :],
     )
     if n == 0:
         return gradients
@@ -158,10 +169,9 @@ def backward_render(
         return kernel_arg(tensor.contiguous(), dtype, _bindings)
 
     width, height = raster_settings.image_width, raster_settings.image_height
-    kernel = (
-        _backward_cull
-        if raster_settings.settings.culling_settings.hierarchical_4x4_culling
-        else _backward_unculled
+    kernel = _make_backward(
+        bool(raster_settings.settings.culling_settings.hierarchical_4x4_culling),
+        channels,
     )
     launch(
         kernel,
@@ -171,7 +181,10 @@ def backward_render(
             height,
             kernel_arg(bins["ranges"].view(-1), wp.int32, _bindings),
             kernel_arg(bins["point_list"], wp.int32, _bindings),
-            kernel_arg(preprocessed["rgb"], wp.vec3, _bindings),
+            arg(
+                contiguous_features(preprocessed["rgb"]),
+                wp.types.vector(channels, wp.float32),
+            ),
             kernel_arg(output["color"].view(-1), wp.float32, _bindings),
             kernel_arg(output["final_T"].view(-1), wp.float32, _bindings),
             kernel_arg(output["contributors"].view(-1), wp.int32, _bindings),

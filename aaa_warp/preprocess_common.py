@@ -8,7 +8,7 @@ from .sh import evaluate_sh
 def finish_preprocess(
     means: wp.array(dtype=wp.vec3), scales: wp.array(dtype=wp.vec3),
     rotations: wp.array(dtype=wp.vec4), camera: wp.array(dtype=wp.vec3),
-    colors: wp.array(dtype=wp.vec3), sh: wp.array2d(dtype=wp.vec3),
+    sh: wp.array2d(dtype=wp.vec3),
     use_sh: bool, degree: int, modifier: float, sort_order: int,
     need_inverse: bool, eval3d: bool, tile_culling: bool, width: int, height: int,
     centers: wp.array(dtype=wp.vec2), rects: wp.array(dtype=wp.vec2),
@@ -59,8 +59,7 @@ def finish_preprocess(
         for c in range(3):
             clamped[i,c] = color[c] < 0.0
         rgb[i] = wp.vec3(wp.max(color[0],0.0),wp.max(color[1],0.0),wp.max(color[2],0.0))
-    else:
-        rgb[i] = colors[i]
+    # Precomputed features alias their Torch input in the host wrapper.
     if need_inverse and not eval3d:
         scale = scales[i]
         s = wp.vec3(1.0/(modifier*wp.max(1.0e-3,scale[0])),

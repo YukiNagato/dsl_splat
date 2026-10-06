@@ -6,15 +6,18 @@ four-entry heads in registers. Queue state and algorithm are Python wp.funcs.
 Only shared allocation, subgroup intrinsics, aligned loads and a rounded
 reciprocal remain native. Shared queue access and ray math use Python/Warp.
 
-Experimental alternative; render_hierarchical_native remains the baseline
-and the default public renderer. StopThePop algorithm: MIT, Graz UT, 2024.
+Feature vectors and loops specialize at compile time for each channel count.
+render_hierarchical_native remains the unchanged RGB baseline and default
+for RGB. StopThePop algorithm: MIT, Graz UT, 2024.
 """
+
+from functools import cache
 
 import torch
 import warp as wp
 
 from .dispatch import kernel_arg, launch
-from .interop import current_stream
+from .interop import current_stream, contiguous_features
 from .render_adjoint import RenderAdjoint
 from .render_warp_geometry import sample, frustum
 from .render_warp_intrinsics import (
@@ -32,28 +35,33 @@ INF = wp.constant(3.4028234663852886e38)
 FULL = wp.constant(wp.uint32(0xFFFFFFFF))
 
 
-@wp.struct
-class Pixel:
-    # Per-thread register state. Unlike CUDA's packed `fill` integer, each
-    # queue has its own count; functions return updated state by value.
-    active: bool
-    transmittance: float
-    color: wp.vec3
-    contributors: int
-    tail_count: int
-    mid_count: int
-    head_count: int
-    head_depths: wp.vec4
-    head_alphas: wp.vec4
-    head_ids: wp.vec4i
-    head_gaussians: wp.vec4
-    x: float
-    y: float
-    gradient: wp.vec3
-    final_color: wp.vec3
-    final_transmittance: float
-    background_gradient: float
-    adjoint: RenderAdjoint
+@cache
+def _pixel_type(channels):
+    feature_type = wp.types.vector(channels, wp.float32)
+
+    @wp.struct
+    class Pixel:
+        # Feature accumulators have a compile-time size; queue sizes stay fixed.
+        active: bool
+        transmittance: float
+        color: feature_type
+        contributors: int
+        tail_count: int
+        mid_count: int
+        head_count: int
+        head_depths: wp.vec4
+        head_alphas: wp.vec4
+        head_ids: wp.vec4i
+        head_gaussians: wp.vec4
+        x: float
+        y: float
+        gradient: feature_type
+        final_color: feature_type
+        final_transmittance: float
+        background_gradient: float
+        adjoint: RenderAdjoint
+
+    return Pixel
 
 
 @wp.struct
@@ -115,29 +123,36 @@ def store(q: Queue, index: int, depth: float, id: int):
     q.ids[q.base + index] = id
 
 
-@wp.func
-def blend(pixel: Pixel, colors: wp.array(dtype=wp.vec3)):
-    p = pixel
-    p.head_count -= 1
-    if p.active:
-        alpha = p.head_alphas[0]
-        next_t = p.transmittance * (1.0 - alpha)
-        if next_t < 0.0001:
-            # CUDA does not blend the sample that triggers early termination.
-            p.active = False
-        else:
-            rgb = colors[p.head_ids[0]]
-            for ch in range(3):
-                c = wp.static(ch)
-                p.color[c] = p.color[c] + rgb[c] * alpha * p.transmittance
-            p.transmittance = next_t
-            for index in range(1, 4):
-                j = wp.static(index)
-                p.head_depths[j - 1] = p.head_depths[j]
-                p.head_alphas[j - 1] = p.head_alphas[j]
-                p.head_ids[j - 1] = p.head_ids[j]
-            p.head_depths[3] = INF
-    return p
+@cache
+def _make_blend(channels):
+    Pixel = _pixel_type(channels)
+    feature_type = wp.types.vector(channels, wp.float32)
+
+    @wp.func
+    def blend_step(pixel: Pixel, colors: wp.array(dtype=feature_type)):
+        p = pixel
+        p.head_count -= 1
+        if p.active:
+            alpha = p.head_alphas[0]
+            next_t = p.transmittance * (1.0 - alpha)
+            if next_t < 0.0001:
+                # CUDA does not blend the sample that triggers early termination.
+                p.active = False
+            else:
+                rgb = colors[p.head_ids[0]]
+                for ch in range(wp.static(channels)):
+                    c = wp.static(ch)
+                    p.color[c] = p.color[c] + rgb[c] * alpha * p.transmittance
+                p.transmittance = next_t
+                for index in range(1, 4):
+                    j = wp.static(index)
+                    p.head_depths[j - 1] = p.head_depths[j]
+                    p.head_alphas[j - 1] = p.head_alphas[j]
+                    p.head_ids[j - 1] = p.head_ids[j]
+                p.head_depths[3] = INF
+        return p
+
+    return blend_step
 
 
 @wp.func
@@ -179,24 +194,30 @@ def merge(
     sync(mask)
 
 
-@wp.func
-def insert_head(pixel: Pixel, depth: float, alpha: float, id: int, gaussian: float):
-    p = pixel
-    for slot in range(4):
-        s = wp.static(slot)
-        if depth < p.head_depths[s]:
-            old_depth = float(p.head_depths[s])
-            old_alpha = float(p.head_alphas[s])
-            old_id = int(p.head_ids[s])
-            old_gaussian = float(p.head_gaussians[s])
-            p.head_depths[s] = depth
-            p.head_alphas[s] = alpha
-            p.head_ids[s] = id
-            p.head_gaussians[s] = gaussian
-            depth, alpha, id = old_depth, old_alpha, old_id
-            gaussian = old_gaussian
-    p.head_count += 1
-    return p
+@cache
+def _make_insert_head(channels):
+    Pixel = _pixel_type(channels)
+
+    @wp.func
+    def insert_head(pixel: Pixel, depth: float, alpha: float, id: int, gaussian: float):
+        p = pixel
+        for slot in range(4):
+            s = wp.static(slot)
+            if depth < p.head_depths[s]:
+                old_depth = float(p.head_depths[s])
+                old_alpha = float(p.head_alphas[s])
+                old_id = int(p.head_ids[s])
+                old_gaussian = float(p.head_gaussians[s])
+                p.head_depths[s] = depth
+                p.head_alphas[s] = alpha
+                p.head_ids[s] = id
+                p.head_gaussians[s] = gaussian
+                depth, alpha, id = old_depth, old_alpha, old_id
+                gaussian = old_gaussian
+        p.head_count += 1
+        return p
+
+    return insert_head
 
 
 @wp.func
@@ -211,7 +232,11 @@ def rank_mid(group: Group, depth: float):
     return rank
 
 
-def _make_stream_functions(blend_step):
+def _make_stream_functions(blend_step, channels):
+    Pixel = _pixel_type(channels)
+    feature_type = wp.types.vector(channels, wp.float32)
+    insert_head = _make_insert_head(channels)
+
     @wp.func
     def front_mid(
         pixel: Pixel,
@@ -220,7 +245,7 @@ def _make_stream_functions(blend_step):
         check_valid: bool,
         transforms: wp.array(dtype=wp.mat44),
         opacity: wp.array(dtype=float),
-        colors: wp.array(dtype=wp.vec3),
+        colors: wp.array(dtype=feature_type),
     ):
         """Consume the front four mid entries, inserting samples into each head."""
         p = pixel
@@ -267,7 +292,7 @@ def _make_stream_functions(blend_step):
         check_valid: bool,
         transforms: wp.array(dtype=wp.mat44),
         opacity: wp.array(dtype=float),
-        colors: wp.array(dtype=wp.vec3),
+        colors: wp.array(dtype=feature_type),
     ):
         """Move sixteen tail entries through the four 2x2 mid groups."""
         p = pixel
@@ -340,8 +365,12 @@ def sort_batch(tail: Queue, group: Group):
         size *= 2
 
 
-def _make_evaluation(cull_4x4, blend_step=blend, backward=False):
-    front_mid, push_mid = _make_stream_functions(blend_step)
+def _make_evaluation(cull_4x4, blend_step=None, backward=False, channels=3):
+    Pixel = _pixel_type(channels)
+    feature_type = wp.types.vector(channels, wp.float32)
+    if blend_step is None:
+        blend_step = _make_blend(channels)
+    front_mid, push_mid = _make_stream_functions(blend_step, channels)
 
     # Keep streaming loops rolled. Unroll only the fixed vector accesses in
     # the helpers with wp.static: broad unrolling inflates register pressure.
@@ -354,7 +383,7 @@ def _make_evaluation(cull_4x4, blend_step=blend, backward=False):
         point_list: wp.array(dtype=int),
         transforms: wp.array(dtype=wp.mat44),
         opacity: wp.array(dtype=float),
-        colors: wp.array(dtype=wp.vec3),
+        colors: wp.array(dtype=feature_type),
         bg: wp.array(dtype=float),
         output: wp.array(dtype=float),
         final_t: wp.array(dtype=float),
@@ -391,7 +420,7 @@ def _make_evaluation(cull_4x4, blend_step=blend, backward=False):
             if p.active:
                 pixel_index = group.y * width + group.x
                 p.final_transmittance = final_t[pixel_index]
-                for channel in range(3):
+                for channel in range(wp.static(channels)):
                     ch = wp.static(channel)
                     offset = ch * width * height + pixel_index
                     p.gradient[ch] = adjoint.pixel_gradient[offset]
@@ -505,7 +534,7 @@ def _make_evaluation(cull_4x4, blend_step=blend, backward=False):
                     p = blend_step(p, colors)
         if not replay_backward and group.x < width and group.y < height:
             index = group.y * width + group.x
-            for channel in range(3):
+            for channel in range(wp.static(channels)):
                 ch = wp.static(channel)
                 output[ch * width * height + index] = (
                     p.color[ch] + p.transmittance * bg[ch]
@@ -516,8 +545,10 @@ def _make_evaluation(cull_4x4, blend_step=blend, backward=False):
     return render
 
 
-def _make_kernel(cull_4x4):
-    evaluate = _make_evaluation(cull_4x4)
+@cache
+def _make_kernel(cull_4x4, channels=3):
+    feature_type = wp.types.vector(channels, wp.float32)
+    evaluate = _make_evaluation(cull_4x4, channels=channels)
 
     @wp.kernel(
         module="unique",
@@ -532,7 +563,7 @@ def _make_kernel(cull_4x4):
         point_list: wp.array(dtype=int),
         transforms: wp.array(dtype=wp.mat44),
         opacity: wp.array(dtype=float),
-        colors: wp.array(dtype=wp.vec3),
+        colors: wp.array(dtype=feature_type),
         bg: wp.array(dtype=float),
         output: wp.array(dtype=float),
         final_t: wp.array(dtype=float),
@@ -557,15 +588,14 @@ def _make_kernel(cull_4x4):
     return render
 
 
-_render_cull = _make_kernel(True)
-_render_unculled = _make_kernel(False)
-
-
 @torch.no_grad()
 def render_hierarchical_3d(
     preprocessed, bins, raster_settings, *, output=None, _bindings=None
 ):
-    """Render using fresh dynamic inputs; output reuse is explicitly opt-in."""
+    """Blend (N,C) features in one traversal using a cached C specialization.
+
+    Output reuse is explicitly opt-in; ``color`` has shape (C,H,W).
+    """
     wp.init()
     settings = raster_settings.settings
     if not settings.eval_3D or int(settings.sort_settings.sort_mode) != 3:
@@ -579,8 +609,18 @@ def render_hierarchical_3d(
         raise ValueError("preprocessed data must contain 3D transforms and opacity")
     width, height = raster_settings.image_width, raster_settings.image_height
     device = preprocessed["gauss2screen"].device
+    channels = preprocessed["rgb"].shape[1]
+    if channels <= 0:
+        raise ValueError("features must have at least one channel")
+    if (
+        raster_settings.bg.shape != (channels,)
+        or raster_settings.bg.device != device
+        or raster_settings.bg.dtype != torch.float32
+    ):
+        raise ValueError("bg must be float32 (C,) on the rendering device")
+    feature_type = wp.types.vector(channels, wp.float32)
     layouts = {
-        "color": ((3, height, width), torch.float32),
+        "color": ((channels, height, width), torch.float32),
         "final_T": ((height, width), torch.float32),
         "contributors": ((height, width), torch.int32),
     }
@@ -606,10 +646,8 @@ def render_hierarchical_3d(
     transforms = preprocessed["gauss2screen"].contiguous()
     if transforms.data_ptr() % 16:
         transforms = transforms.clone()
-    kernel = (
-        _render_cull
-        if settings.culling_settings.hierarchical_4x4_culling
-        else _render_unculled
+    kernel = _make_kernel(
+        bool(settings.culling_settings.hierarchical_4x4_culling), channels
     )
     launch(
         kernel,
@@ -621,7 +659,9 @@ def render_hierarchical_3d(
             kernel_arg(bins["point_list"].contiguous(), wp.int32, _bindings),
             kernel_arg(transforms, wp.mat44, _bindings),
             kernel_arg(preprocessed["opacity"].contiguous(), wp.float32, _bindings),
-            kernel_arg(preprocessed["rgb"].contiguous(), wp.vec3, _bindings),
+            kernel_arg(
+                contiguous_features(preprocessed["rgb"]), feature_type, _bindings
+            ),
             kernel_arg(raster_settings.bg.contiguous().view(-1), wp.float32, _bindings),
         ],
         outputs=[

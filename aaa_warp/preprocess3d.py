@@ -11,7 +11,7 @@ from .native_geometry import frustum_depth_native
 def preprocess_3d(
     means: wp.array(dtype=wp.vec3), scales: wp.array(dtype=wp.vec3),
     rotations: wp.array(dtype=wp.vec4), opacities: wp.array(dtype=float),
-    colors: wp.array(dtype=wp.vec3), sh: wp.array2d(dtype=wp.vec3),
+    sh: wp.array2d(dtype=wp.vec3),
     use_sh: bool, degree: int, sort_order: int,
     filters: wp.array(dtype=float), has_filter: bool, camera: wp.array(dtype=wp.vec3),
     view: wp.array2d(dtype=float), proj: wp.array2d(dtype=float),
@@ -152,6 +152,6 @@ def preprocess_3d(
                 for c in range(3):
                     clamped[i,c] = color[c] < 0.0
                 rgb[i] = wp.vec3(wp.max(color[0],0.0),wp.max(color[1],0.0),wp.max(color[2],0.0))
-            else:
-                rgb[i] = colors[i]
+            # Precomputed features alias their Torch input in the host wrapper.
+            # Only SH-generated RGB needs a geometry-stage output buffer.
             valid[i] = True

@@ -5,7 +5,7 @@ This is a forward-only diagnostic implementation, with no autograd registration.
 """
 import torch
 import warp as wp
-from .interop import current_stream
+from .interop import current_stream, contiguous_features
 from .dispatch import kernel_arg, launch, launch_tiled
 from .geometry import rotation_matrix
 from .preprocess3d import preprocess_3d
@@ -32,7 +32,7 @@ def _preprocess(
     tanx: float, tany: float, modifier: float, ewa: bool, rect: bool, tight: bool,
     means2d: wp.array(dtype=wp.vec2), rects: wp.array(dtype=wp.vec2),
     depths: wp.array(dtype=float), covs: wp.array2d(dtype=float),
-    conics: wp.array(dtype=wp.vec4), rgb: wp.array(dtype=wp.vec3),
+    conics: wp.array(dtype=wp.vec4),
     radii: wp.array(dtype=int), tiles: wp.array(dtype=int),
 ):
     i = wp.tid()
@@ -117,7 +117,7 @@ def _preprocess(
 
 @torch.no_grad()
 def preprocess(*, means3D, opacities, raster_settings, scales=None, rotations=None,
-               colors_precomp=None, shs=None, cov3D_precomp=None, filter3D=None, _bindings=None):
+               colors_precomp=None, shs=None, cov3D_precomp=None, filter3D=None, features=None, _bindings=None):
     """Run AAA forward preprocessing and return detached, named CUDA tensors.
 
     Mirrors the supported input branches of AAA's preprocessCUDA, including 3D
@@ -128,8 +128,15 @@ def preprocess(*, means3D, opacities, raster_settings, scales=None, rotations=No
     ``radii``, ``tiles_touched`` and ``valid`` are defined for every row.
     Other fields are meaningful only where ``valid`` is True, as in CUDA;
     rejected geometry/SH rows are not initialized or cleared.
+    ``features`` aliases ``colors_precomp`` and accepts (N,C), C > 0. The
+    legacy result key ``rgb`` contains these contiguous features directly
+    (aliasing input storage when contiguous); SH generates a fresh (N,3) array.
     """
     wp.init()
+    if features is not None:
+        if colors_precomp is not None:
+            raise ValueError('provide features OR colors_precomp, not both')
+        colors_precomp = features
     settings = raster_settings.settings
     culling = settings.culling_settings
     mode, order = int(settings.sort_settings.sort_mode), int(settings.sort_settings.sort_order)
@@ -155,6 +162,13 @@ def preprocess(*, means3D, opacities, raster_settings, scales=None, rotations=No
         return torch.empty((0,)+shape[1:],device=device) if value is None else check(name,value,shape)
     if (shs is None) == (colors_precomp is None):
         raise ValueError('provide exactly one of shs or colors_precomp')
+    channels = 3
+    if colors_precomp is not None:
+        if not isinstance(colors_precomp,torch.Tensor) or colors_precomp.ndim != 2 or colors_precomp.shape[0] != n or colors_precomp.shape[1] <= 0:
+            raise ValueError('features/colors_precomp must have shape (N,C), C > 0')
+        channels = colors_precomp.shape[1]
+        colors_precomp = contiguous_features(check('colors_precomp',colors_precomp,(n,channels)))
+    check('bg',raster_settings.bg,(channels,))
     if cov3D_precomp is None:
         if scales is None or rotations is None:
             raise ValueError('provide scales and rotations')
@@ -179,7 +193,6 @@ def preprocess(*, means3D, opacities, raster_settings, scales=None, rotations=No
         'scales': optional('scales',scales,(n,3)),
         'rotations': optional('rotations',rotations,(n,4)),
         'opacities': scalar_input('opacities',opacities),
-        'colors': optional('colors_precomp',colors_precomp,(n,3)),
         'cov': optional('cov3D_precomp',cov3D_precomp,(n,6)),
         'filter': torch.empty(0,device=device) if filter3D is None else scalar_input('filter3D',filter3D),
         'sh': optional('shs',shs,tuple(shs.shape) if shs is not None else (n,0,3)),
@@ -192,7 +205,7 @@ def preprocess(*, means3D, opacities, raster_settings, scales=None, rotations=No
         raise ValueError('image dimensions and field of view tangents must be positive')
     if raster_settings.scale_modifier <= 0:
         raise ValueError('scale_modifier must be positive')
-    shapes = {'means2D':(n,2),'rects2D':(n,2),'depths':(n,),'rgb':(n,3),'radii':(n,),'tiles_touched':(n,)}
+    shapes = {'means2D':(n,2),'rects2D':(n,2),'depths':(n,),'radii':(n,),'tiles_touched':(n,)}
     if eval3d:
         shapes.update(gauss2screen=(n,4,4),opacity=(n,))
     else:
@@ -201,6 +214,7 @@ def preprocess(*, means3D, opacities, raster_settings, scales=None, rotations=No
             shapes['cov3D_inv'] = (n,3,4)
     if shs is not None:
         shapes['clamped'] = (n,3)
+        shapes['rgb'] = (n,3)
     shapes['valid'] = (n,)
     cooperative = bool(settings.load_balancing and culling.tile_based_culling)
     complete_3d = eval3d and not cooperative
@@ -216,6 +230,8 @@ def preprocess(*, means3D, opacities, raster_settings, scales=None, rotations=No
         def out(key,dtype=wp.float32,empty_shape=(0,)):
             if key in result:
                 return kernel_arg(result[key],dtype,_bindings)
+            if key == 'rgb':
+                empty_shape = (0,3)
             t = torch.empty(empty_shape,device=device,dtype=torch.bool if dtype==wp.bool else torch.float32)
             refs.append(t)
             return kernel_arg(t,dtype,_bindings)
@@ -227,7 +243,7 @@ def preprocess(*, means3D, opacities, raster_settings, scales=None, rotations=No
             refs.extend((queue,queue_size))
             queued_arg = kernel_arg(queue,bindings=_bindings)
             queue_size_arg = kernel_arg(queue_size,bindings=_bindings)
-            launch(preprocess_3d,dim=n,inputs=[means,scale,rotation,arr('opacities'),arr('colors',wp.vec3),
+            launch(preprocess_3d,dim=n,inputs=[means,scale,rotation,arr('opacities'),
                 arr('sh',wp.vec3),shs is not None,degree,order,arr('filter'),
                 filter3D is not None,arr('camera',wp.vec3),arr('view'),arr('proj'),w,h,
                 raster_settings.tanfovx,raster_settings.tanfovy,raster_settings.scale_modifier,
@@ -241,7 +257,7 @@ def preprocess(*, means3D, opacities, raster_settings, scales=None, rotations=No
             launch(_preprocess,dim=n,inputs=[means,scale,rotation,arr('opacities'),arr('cov'),cov3D_precomp is not None,
                 arr('view'),arr('proj'),w,h,raster_settings.tanfovx,raster_settings.tanfovy,raster_settings.scale_modifier,
                 settings.proper_ewa_scaling,culling.rect_bounding,culling.tight_opacity_bounding],
-                outputs=common+[out('cov3D'),out('conic_opacity',wp.vec4),out('rgb',wp.vec3),out('radii',wp.int32),out('tiles_touched',wp.int32)],stream=stream,bindings=_bindings)
+                outputs=common+[out('cov3D'),out('conic_opacity',wp.vec4),out('radii',wp.int32),out('tiles_touched',wp.int32)],stream=stream,bindings=_bindings)
         if cooperative and eval3d:
             remainder_blocks = min(n,1024)
             launch_tiled(cull_remainder_3d,dim=remainder_blocks,
@@ -267,11 +283,15 @@ def preprocess(*, means3D, opacities, raster_settings, scales=None, rotations=No
                             inputs=culling_inputs+[remainder_blocks],
                             outputs=culling_outputs, block_dim=32, stream=stream,bindings=_bindings)
         if not eval3d:
-            launch(finish_preprocess,dim=n,inputs=[means,scale,rotation,arr('camera',wp.vec3),arr('colors',wp.vec3),
+            launch(finish_preprocess,dim=n,inputs=[means,scale,rotation,arr('camera',wp.vec3),
                 arr('sh',wp.vec3),shs is not None,degree,raster_settings.scale_modifier,order,need_inverse,eval3d,
                 culling.tile_based_culling and not cooperative,w,h,out('means2D',wp.vec2),out('rects2D',wp.vec2),
                 out('conic_opacity',wp.vec4,(0,4)),out('gauss2screen',wp.mat44,(0,4,4)),out('opacity'),
                 out('cov3D',empty_shape=(0,6))],
                 outputs=[out('depths'),out('rgb',wp.vec3),out('clamped',wp.bool,(0,3)),out('cov3D_inv',wp.float32,(0,3,4)),
                          out('radii',wp.int32),out('tiles_touched',wp.int32),out('valid',wp.bool)],stream=stream,bindings=_bindings)
+    if colors_precomp is not None:
+        # Legacy key retained for stage/API compatibility; it can now hold C
+        # channels. No extra feature copy or per-channel geometry pass.
+        result['rgb'] = colors_precomp.detach() if colors_precomp.requires_grad else colors_precomp
     return result

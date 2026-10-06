@@ -2,7 +2,7 @@
 
 from .preprocess import preprocess
 from .binning import bin_and_sort
-from .render_hierarchical_native import render_hierarchical_3d
+from .render import render_hierarchical_3d
 from .rasterizer import GaussianRasterizer
 from .settings import (
     GaussianRasterizationSettings,

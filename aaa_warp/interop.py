@@ -3,6 +3,18 @@ import torch
 import warp as wp
 
 
+def contiguous_features(tensor):
+    """Canonical inner strides for Warp's fixed-length vector descriptors.
+
+    Torch regards empty/singleton dimensions as contiguous even when their
+    stored stride is greater than one. Warp vector arrays require stride one.
+    """
+    value = tensor.contiguous()
+    if value.stride(-1) != 1:
+        value = value.clone(memory_format=torch.contiguous_format)
+    return value
+
+
 def current_stream(device, *, bindings=None):
     """Reuse the active Warp wrapper when it is already Torch's current stream.
 
