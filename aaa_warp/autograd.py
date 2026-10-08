@@ -1,6 +1,6 @@
 """First-order Torch autograd bridge to the analytic Warp backward kernels."""
 
-from copy import copy
+from typing import Any, cast
 
 import torch
 from torch.autograd.function import once_differentiable
@@ -8,8 +8,10 @@ from torch.autograd.function import once_differentiable
 from .backward_preprocess import backward_preprocess
 from .backward_render import backward_render
 from .binning import bin_and_sort
-from .dispatch import FrameBindings
-from .preprocess import preprocess
+from .dispatch import FrameBindings, LaunchCache
+from .frame import FrameOptions, prepare_frame
+from .settings import GaussianRasterizationSettings, copy_settings
+from .types import GaussianInputs, Renderer, RasterizationOutput
 
 INPUT_NAMES = (
     "means3D",
@@ -25,39 +27,24 @@ INPUT_NAMES = (
 CAMERA_NAMES = ("bg", "viewmatrix", "projmatrix", "inv_viewprojmatrix", "campos")
 
 
-def _stage_options(state, options):
-    """Optional adapter culling and read-only geometry metadata, before binning."""
-    if options is None:
-        return
-    radius_clip = options.get("radius_clip", 0.0)
-    if radius_clip > 0:
-        keep = state["radii"] > radius_clip
-        state["radii"] = torch.where(keep, state["radii"], 0)
-        state["tiles_touched"] = torch.where(keep, state["tiles_touched"], 0)
-        state["valid"] = state["valid"] & keep
-    holder = options.get("state_out")
-    if holder is not None:
-        holder.update(state)
-
-
 class Rasterize(torch.autograd.Function):
     @staticmethod
     def forward(
-        ctx,
-        means3D,
-        means2D,
-        opacities,
-        filter3D,
-        shs,
-        colors_precomp,
-        scales,
-        rotations,
-        cov3D_precomp,
-        config,
-        renderer,
-        launch_cache,
-        stage_options,
-    ):
+        ctx: Any,
+        means3D: torch.Tensor,
+        means2D: torch.Tensor | None,
+        opacities: torch.Tensor | None,
+        filter3D: torch.Tensor | None,
+        shs: torch.Tensor | None,
+        colors_precomp: torch.Tensor | None,
+        scales: torch.Tensor | None,
+        rotations: torch.Tensor | None,
+        cov3D_precomp: torch.Tensor | None,
+        config: GaussianRasterizationSettings,
+        renderer: Renderer,
+        launch_cache: LaunchCache,
+        stage_options: FrameOptions | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         values = (
             means3D,
             means2D,
@@ -69,25 +56,16 @@ class Rasterize(torch.autograd.Function):
             rotations,
             cov3D_precomp,
         )
-        inputs = dict(zip(INPUT_NAMES, values))
-        options = {} if stage_options is None else stage_options
-        bindings = options.get("bindings") or FrameBindings(launch_cache)
-        state = options.get("preprocessed")
-        if state is None:
-            state = preprocess(
-                **{key: value for key, value in inputs.items() if key != "means2D"},
-                raster_settings=config,
-                principal_point=options.get("principal_point"),
-                _bindings=bindings,
-            )
-            _stage_options(state, stage_options)
+        inputs = cast(GaussianInputs, dict(zip(INPUT_NAMES, values)))
+        frame = prepare_frame(inputs, config, launch_cache, stage_options)
+        state, bindings = frame.state, frame.bindings
         bins = bin_and_sort(state, config, diagnostics=False, _bindings=bindings)
         output = renderer(state, bins, config, _bindings=bindings)
         if means3D.shape[0] == 0:
             output["color"].zero_()
         # Keep every frame's own intermediates. Save via Torch so in-place
         # changes to inputs/camera/auxiliary outputs are detected by autograd.
-        named = []
+        named: list[tuple[str, str, torch.Tensor]] = []
         for namespace, mapping in (
             ("inputs", inputs),
             (
@@ -109,16 +87,12 @@ class Rasterize(torch.autograd.Function):
         named.extend(("camera", key, getattr(config, key)) for key in CAMERA_NAMES)
         ctx.names = [(namespace, key) for namespace, key, _ in named]
         ctx.save_for_backward(*(value for _, _, value in named))
-        # Snapshot the four mutable dataclass nodes without recursively copying
-        # their scalar/enum fields. Each outstanding frame retains its settings.
-        settings = copy(config.settings)
-        settings.sort_settings = copy(settings.sort_settings)
-        settings.sort_settings.queue_sizes = copy(settings.sort_settings.queue_sizes)
-        settings.culling_settings = copy(settings.culling_settings)
-        ctx.config = config._replace(settings=settings)
+        ctx.config = config._replace(settings=copy_settings(config.settings))
         ctx.launch_cache = launch_cache
-        ctx.screen_grad = bool(options.get("screen_grad", False))
-        ctx.absgrad_target = options.get("absgrad_target")
+        ctx.screen_grad = stage_options is not None and stage_options.screen_grad
+        ctx.absgrad_target = (
+            None if stage_options is None else stage_options.absgrad_target
+        )
         ctx.mark_non_differentiable(
             state["radii"], output["final_T"], output["contributors"]
         )
@@ -132,10 +106,16 @@ class Rasterize(torch.autograd.Function):
 
     @staticmethod
     @once_differentiable
-    def backward(ctx, grad_color, grad_radii, grad_t, grad_contributors):
+    def backward(
+        ctx: Any,
+        grad_color: torch.Tensor | None,
+        grad_radii: torch.Tensor | None,
+        grad_t: torch.Tensor | None,
+        grad_contributors: torch.Tensor | None,
+    ) -> tuple[torch.Tensor | None, ...]:
         if grad_color is None:
             return (None,) * 13
-        mappings = {
+        mappings: dict[str, dict[str, torch.Tensor]] = {
             name: {} for name in ("inputs", "state", "bins", "output", "camera")
         }
         for (namespace, key), value in zip(ctx.names, ctx.saved_tensors):
@@ -154,32 +134,24 @@ class Rasterize(torch.autograd.Function):
             _bindings=bindings,
         )
         if ctx.absgrad_target is not None:
-            target, rows, gaussian_ids = ctx.absgrad_target
-            with torch.no_grad():
-                if rows is None:
-                    target.copy_(render_gradients["means2D_abs"])
-                else:
-                    target.index_copy_(
-                        0, rows, render_gradients["means2D_abs"][gaussian_ids]
-                    )
+            ctx.absgrad_target.write(render_gradients["means2D_abs"])
         gradients = backward_preprocess(
             inputs, mappings["state"], render_gradients, config, _bindings=bindings
         )
-        result = []
+        result: list[torch.Tensor | None] = []
         for name in INPUT_NAMES:
             if name not in inputs or name in ("filter3D", "cov3D_precomp"):
                 result.append(None)
             elif name == "means2D":
                 # Original AAA 3D calls retain their zero dummy gradient. The
                 # gsplat adapter explicitly opts into virtual screen translation.
+                gradient = (
+                    render_gradients["means2D"] if ctx.screen_grad else gradients[name]
+                )
                 result.append(
-                    render_gradients["means2D"]
-                    if ctx.screen_grad
-                    else (
-                        gradients[name]
-                        if gradients[name].shape == inputs[name].shape
-                        else torch.zeros_like(inputs[name])
-                    )
+                    gradient
+                    if gradient.shape == inputs[name].shape
+                    else torch.zeros_like(inputs[name])
                 )
             else:
                 result.append(gradients[name].reshape_as(inputs[name]))
@@ -187,8 +159,13 @@ class Rasterize(torch.autograd.Function):
 
 
 def rasterize_with_grad(
-    inputs, means2D, config, renderer, launch_cache, stage_options=None
-):
+    inputs: GaussianInputs,
+    means2D: torch.Tensor | None,
+    config: GaussianRasterizationSettings,
+    renderer: Renderer,
+    launch_cache: LaunchCache,
+    stage_options: FrameOptions | None = None,
+) -> RasterizationOutput:
     values = dict(inputs, means2D=means2D)
     color, radii, final_t, contributors = Rasterize.apply(
         *(values.get(name) for name in INPUT_NAMES),

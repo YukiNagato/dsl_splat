@@ -11,12 +11,16 @@ render_hierarchical_native remains the unchanged RGB baseline and default
 for RGB. StopThePop algorithm: MIT, Graz UT, 2024.
 """
 
+from .dispatch import FrameBindings, kernel_arg, launch
+from .settings import GaussianRasterizationSettings
+from .types import PreprocessedGaussians, TileBins, RenderOutput
+
 from functools import cache
+from typing import cast
 
 import torch
 import warp as wp
 
-from .dispatch import kernel_arg, launch
 from .interop import current_stream, contiguous_features
 from .render_adjoint import RenderAdjoint
 from .render_warp_geometry import sample, frustum
@@ -36,7 +40,7 @@ FULL = wp.constant(wp.uint32(0xFFFFFFFF))
 
 
 @cache
-def _pixel_type(channels):
+def _pixel_type(channels: int) -> type:
     feature_type = wp.types.vector(channels, wp.float32)
 
     @wp.struct
@@ -124,7 +128,7 @@ def store(q: Queue, index: int, depth: float, id: int):
 
 
 @cache
-def _make_blend(channels):
+def _make_blend(channels: int) -> wp.Function:
     Pixel = _pixel_type(channels)
     feature_type = wp.types.vector(channels, wp.float32)
 
@@ -195,7 +199,7 @@ def merge(
 
 
 @cache
-def _make_insert_head(channels):
+def _make_insert_head(channels: int) -> wp.Function:
     Pixel = _pixel_type(channels)
 
     @wp.func
@@ -232,7 +236,9 @@ def rank_mid(group: Group, depth: float):
     return rank
 
 
-def _make_stream_functions(blend_step, channels):
+def _make_stream_functions(
+    blend_step: wp.Function, channels: int
+) -> tuple[wp.Function, wp.Function]:
     Pixel = _pixel_type(channels)
     feature_type = wp.types.vector(channels, wp.float32)
     insert_head = _make_insert_head(channels)
@@ -365,7 +371,12 @@ def sort_batch(tail: Queue, group: Group):
         size *= 2
 
 
-def _make_evaluation(cull_4x4, blend_step=None, backward=False, channels=3):
+def _make_evaluation(
+    cull_4x4: bool,
+    blend_step: wp.Function | None = None,
+    backward: bool = False,
+    channels: int = 3,
+) -> wp.Function:
     Pixel = _pixel_type(channels)
     feature_type = wp.types.vector(channels, wp.float32)
     if blend_step is None:
@@ -546,7 +557,7 @@ def _make_evaluation(cull_4x4, blend_step=None, backward=False, channels=3):
 
 
 @cache
-def _make_kernel(cull_4x4, channels=3):
+def _make_kernel(cull_4x4: bool, channels: int = 3) -> wp.Kernel:
     feature_type = wp.types.vector(channels, wp.float32)
     evaluate = _make_evaluation(cull_4x4, channels=channels)
 
@@ -590,8 +601,13 @@ def _make_kernel(cull_4x4, channels=3):
 
 @torch.no_grad()
 def render_hierarchical_3d(
-    preprocessed, bins, raster_settings, *, output=None, _bindings=None
-):
+    preprocessed: PreprocessedGaussians,
+    bins: TileBins,
+    raster_settings: GaussianRasterizationSettings,
+    *,
+    output: RenderOutput | None = None,
+    _bindings: FrameBindings | None = None,
+) -> RenderOutput:
     """Blend (N,C) features in one traversal using a cached C specialization.
 
     Output reuse is explicitly opt-in; ``color`` has shape (C,H,W).
@@ -625,10 +641,13 @@ def render_hierarchical_3d(
         "contributors": ((height, width), torch.int32),
     }
     if output is None:
-        output = {
-            name: torch.empty(shape, dtype=dtype, device=device)
-            for name, (shape, dtype) in layouts.items()
-        }
+        output = cast(
+            RenderOutput,
+            {
+                name: torch.empty(shape, dtype=dtype, device=device)
+                for name, (shape, dtype) in layouts.items()
+            },
+        )
     else:
         for name, (shape, dtype) in layouts.items():
             value = output.get(name)

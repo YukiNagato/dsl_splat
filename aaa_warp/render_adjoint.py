@@ -29,7 +29,9 @@ class RenderAdjoint:
 
 
 @cache
-def _make_accumulate_ray_gradient(screen_grad=False, absgrad=False):
+def _make_accumulate_ray_gradient(
+    screen_grad: bool = False, absgrad: bool = False
+) -> wp.Function:
     """Specialize optional screen-space statistics out of the ordinary backward."""
 
     @wp.func
@@ -101,6 +103,3 @@ def _make_accumulate_ray_gradient(screen_grad=False, absgrad=False):
                 )
 
     return accumulate
-
-
-accumulate_ray_gradient = _make_accumulate_ray_gradient()

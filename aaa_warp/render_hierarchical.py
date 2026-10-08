@@ -7,6 +7,9 @@ Warp implementation keeps the same queue capacities per pixel, allowing the
 streaming 64/8/4 ordering and blending to be checked independently. It is a
 forward diagnostic path and intentionally does not register a backward pass.
 """
+
+from .settings import GaussianRasterizationSettings
+from .types import PreprocessedGaussians, TileBins, RenderOutput
 import torch
 import warp as wp
 
@@ -18,12 +21,16 @@ def _sample(g2s: wp.mat44, x: float, y: float):
     plane_x = g2s[0] - g2s[3] * x
     plane_y = g2s[1] - g2s[3] * y
     # Preserve the arithmetic order of consistent_common.cuh::max_contrib_ray.
-    d = wp.vec3(plane_x[1] * plane_y[2] - plane_x[2] * plane_y[1],
-                plane_x[2] * plane_y[0] - plane_x[0] * plane_y[2],
-                plane_x[0] * plane_y[1] - plane_x[1] * plane_y[0])
-    m = wp.vec3(plane_x[3] * plane_y[0] - plane_x[0] * plane_y[3],
-                plane_x[3] * plane_y[1] - plane_x[1] * plane_y[3],
-                plane_x[3] * plane_y[2] - plane_x[2] * plane_y[3])
+    d = wp.vec3(
+        plane_x[1] * plane_y[2] - plane_x[2] * plane_y[1],
+        plane_x[2] * plane_y[0] - plane_x[0] * plane_y[2],
+        plane_x[0] * plane_y[1] - plane_x[1] * plane_y[0],
+    )
+    m = wp.vec3(
+        plane_x[3] * plane_y[0] - plane_x[0] * plane_y[3],
+        plane_x[3] * plane_y[1] - plane_x[1] * plane_y[3],
+        plane_x[3] * plane_y[2] - plane_x[2] * plane_y[3],
+    )
     m_div_dd = m / wp.dot(d, d)
     p = wp.cross(d, m_div_dd)
     pos = wp.vec4(p[0], p[1], p[2], 1.0)
@@ -32,29 +39,46 @@ def _sample(g2s: wp.mat44, x: float, y: float):
 
 
 @wp.func
-def _blend_first(p: int, head_ids: wp.array2d(dtype=wp.int32),
-                 head_alphas: wp.array2d(dtype=wp.float32),
-                 colors: wp.array(dtype=wp.vec3), state: wp.vec4):
+def _blend_first(
+    p: int,
+    head_ids: wp.array2d(dtype=wp.int32),
+    head_alphas: wp.array2d(dtype=wp.float32),
+    colors: wp.array(dtype=wp.vec3),
+    state: wp.vec4,
+):
     alpha = head_alphas[0, p]
     transmittance = state[3] * (1.0 - alpha)
     active = transmittance >= 0.0001
     if active:
         rgb = colors[head_ids[0, p]]
         weight = alpha * state[3]
-        state = wp.vec4(state[0] + rgb[0] * weight,
-                        state[1] + rgb[1] * weight,
-                        state[2] + rgb[2] * weight, transmittance)
+        state = wp.vec4(
+            state[0] + rgb[0] * weight,
+            state[1] + rgb[1] * weight,
+            state[2] + rgb[2] * weight,
+            transmittance,
+        )
     return state, active
 
 
 @wp.func
-def _front_mid(p: int, n: int, mid_ids: wp.array2d(dtype=wp.int32),
-               head_ids: wp.array2d(dtype=wp.int32),
-               head_depths: wp.array2d(dtype=wp.float32),
-               head_alphas: wp.array2d(dtype=wp.float32),
-               transforms: wp.array(dtype=wp.mat44), opacities: wp.array(dtype=wp.float32),
-               colors: wp.array(dtype=wp.vec3), x: float, y: float,
-               head_count: int, contributor: int, active: bool, state: wp.vec4):
+def _front_mid(
+    p: int,
+    n: int,
+    mid_ids: wp.array2d(dtype=wp.int32),
+    head_ids: wp.array2d(dtype=wp.int32),
+    head_depths: wp.array2d(dtype=wp.float32),
+    head_alphas: wp.array2d(dtype=wp.float32),
+    transforms: wp.array(dtype=wp.mat44),
+    opacities: wp.array(dtype=wp.float32),
+    colors: wp.array(dtype=wp.vec3),
+    x: float,
+    y: float,
+    head_count: int,
+    contributor: int,
+    active: bool,
+    state: wp.vec4,
+):
     # A CUDA head group consumes four mid slots, including invalid slots when
     # draining. A full head is blended before inspecting the next slot.
     for j in range(4):
@@ -92,9 +116,14 @@ def _front_mid(p: int, n: int, mid_ids: wp.array2d(dtype=wp.int32),
 
 
 @wp.func
-def _push_mid(p: int, gid: int, depth: float,
-              mid_ids: wp.array2d(dtype=wp.int32),
-              mid_depths: wp.array2d(dtype=wp.float32), mid_count: int):
+def _push_mid(
+    p: int,
+    gid: int,
+    depth: float,
+    mid_ids: wp.array2d(dtype=wp.int32),
+    mid_depths: wp.array2d(dtype=wp.float32),
+    mid_count: int,
+):
     loc = mid_count
     while loc > 0 and depth < mid_depths[loc - 1, p]:
         mid_depths[loc, p] = mid_depths[loc - 1, p]
@@ -106,19 +135,30 @@ def _push_mid(p: int, gid: int, depth: float,
 
 
 @wp.func
-def _flush_tail(p: int, amount: int, tail_count: int, mid_count: int,
-                head_count: int, contributor: int, active: bool, state: wp.vec4,
-                tail_ids: wp.array2d(dtype=wp.int32),
-                tail_depths: wp.array2d(dtype=wp.float32),
-                mid_ids: wp.array2d(dtype=wp.int32),
-                mid_depths: wp.array2d(dtype=wp.float32),
-                head_ids: wp.array2d(dtype=wp.int32),
-                head_depths: wp.array2d(dtype=wp.float32),
-                head_alphas: wp.array2d(dtype=wp.float32),
-                transforms: wp.array(dtype=wp.mat44),
-                opacities: wp.array(dtype=wp.float32),
-                colors: wp.array(dtype=wp.vec3),
-                mid_x: float, mid_y: float, x: float, y: float):
+def _flush_tail(
+    p: int,
+    amount: int,
+    tail_count: int,
+    mid_count: int,
+    head_count: int,
+    contributor: int,
+    active: bool,
+    state: wp.vec4,
+    tail_ids: wp.array2d(dtype=wp.int32),
+    tail_depths: wp.array2d(dtype=wp.float32),
+    mid_ids: wp.array2d(dtype=wp.int32),
+    mid_depths: wp.array2d(dtype=wp.float32),
+    head_ids: wp.array2d(dtype=wp.int32),
+    head_depths: wp.array2d(dtype=wp.float32),
+    head_alphas: wp.array2d(dtype=wp.float32),
+    transforms: wp.array(dtype=wp.mat44),
+    opacities: wp.array(dtype=wp.float32),
+    colors: wp.array(dtype=wp.vec3),
+    mid_x: float,
+    mid_y: float,
+    x: float,
+    y: float,
+):
     # The tail sends 16 ordered candidates to the four 2x2 queues in groups of
     # four. Each mid queue holds up to eight entries and sends four to the head.
     for start in range(0, amount, 4):
@@ -129,9 +169,22 @@ def _flush_tail(p: int, amount: int, tail_count: int, mid_count: int,
             mid_count = _push_mid(p, gid, depth, mid_ids, mid_depths, mid_count)
         if mid_count > 4:
             head_count, contributor, active, state = _front_mid(
-                p, 4, mid_ids, head_ids, head_depths, head_alphas,
-                transforms, opacities, colors, x, y,
-                head_count, contributor, active, state)
+                p,
+                4,
+                mid_ids,
+                head_ids,
+                head_depths,
+                head_alphas,
+                transforms,
+                opacities,
+                colors,
+                x,
+                y,
+                head_count,
+                contributor,
+                active,
+                state,
+            )
             for j in range(mid_count - 4):
                 mid_ids[j, p] = mid_ids[j + 4, p]
                 mid_depths[j, p] = mid_depths[j + 4, p]
@@ -144,15 +197,24 @@ def _flush_tail(p: int, amount: int, tail_count: int, mid_count: int,
 
 @wp.kernel(enable_backward=False)
 def _render_3d(
-    width: int, height: int, cull_4x4: bool,
-    ranges: wp.array2d(dtype=wp.int32), point_list: wp.array(dtype=wp.int32),
-    transforms: wp.array(dtype=wp.mat44), opacities: wp.array(dtype=wp.float32),
-    colors: wp.array(dtype=wp.vec3), bg: wp.array(dtype=wp.vec3),
-    tail_ids: wp.array2d(dtype=wp.int32), tail_depths: wp.array2d(dtype=wp.float32),
-    mid_ids: wp.array2d(dtype=wp.int32), mid_depths: wp.array2d(dtype=wp.float32),
-    head_ids: wp.array2d(dtype=wp.int32), head_depths: wp.array2d(dtype=wp.float32),
+    width: int,
+    height: int,
+    cull_4x4: bool,
+    ranges: wp.array2d(dtype=wp.int32),
+    point_list: wp.array(dtype=wp.int32),
+    transforms: wp.array(dtype=wp.mat44),
+    opacities: wp.array(dtype=wp.float32),
+    colors: wp.array(dtype=wp.vec3),
+    bg: wp.array(dtype=wp.vec3),
+    tail_ids: wp.array2d(dtype=wp.int32),
+    tail_depths: wp.array2d(dtype=wp.float32),
+    mid_ids: wp.array2d(dtype=wp.int32),
+    mid_depths: wp.array2d(dtype=wp.float32),
+    head_ids: wp.array2d(dtype=wp.int32),
+    head_depths: wp.array2d(dtype=wp.float32),
     head_alphas: wp.array2d(dtype=wp.float32),
-    output: wp.array3d(dtype=wp.float32), final_t: wp.array2d(dtype=wp.float32),
+    output: wp.array3d(dtype=wp.float32),
+    final_t: wp.array2d(dtype=wp.float32),
     contributors: wp.array2d(dtype=wp.int32),
 ):
     p = wp.tid()
@@ -177,7 +239,9 @@ def _render_3d(
             if cull_4x4:
                 power = frustum_minimum(
                     wp.vec2(float(ix // 4 * 4), float(iy // 4 * 4)),
-                    wp.vec2(float(ix // 4 * 4 + 3), float(iy // 4 * 4 + 3)), g2s)
+                    wp.vec2(float(ix // 4 * 4 + 3), float(iy // 4 * 4 + 3)),
+                    g2s,
+                )
                 if wp.min(0.99, opacities[gid] * wp.exp(-power)) < 1.0 / 255.0:
                     continue
             _, depth = _sample(g2s, tail_x, tail_y)
@@ -191,21 +255,74 @@ def _render_3d(
             tail_count += 1
         while tail_count > 32:
             tail_count, mid_count, head_count, contributor, active, state = _flush_tail(
-                p, 16, tail_count, mid_count, head_count, contributor, active, state,
-                tail_ids, tail_depths, mid_ids, mid_depths, head_ids, head_depths,
-                head_alphas, transforms, opacities, colors, mid_x, mid_y, x, y)
+                p,
+                16,
+                tail_count,
+                mid_count,
+                head_count,
+                contributor,
+                active,
+                state,
+                tail_ids,
+                tail_depths,
+                mid_ids,
+                mid_depths,
+                head_ids,
+                head_depths,
+                head_alphas,
+                transforms,
+                opacities,
+                colors,
+                mid_x,
+                mid_y,
+                x,
+                y,
+            )
     while tail_count > 0 and active:
         amount = wp.min(16, tail_count)
         tail_count, mid_count, head_count, contributor, active, state = _flush_tail(
-            p, amount, tail_count, mid_count, head_count, contributor, active, state,
-            tail_ids, tail_depths, mid_ids, mid_depths, head_ids, head_depths,
-            head_alphas, transforms, opacities, colors, mid_x, mid_y, x, y)
+            p,
+            amount,
+            tail_count,
+            mid_count,
+            head_count,
+            contributor,
+            active,
+            state,
+            tail_ids,
+            tail_depths,
+            mid_ids,
+            mid_depths,
+            head_ids,
+            head_depths,
+            head_alphas,
+            transforms,
+            opacities,
+            colors,
+            mid_x,
+            mid_y,
+            x,
+            y,
+        )
     while mid_count > 0 and active:
         amount = wp.min(4, mid_count)
         head_count, contributor, active, state = _front_mid(
-            p, amount, mid_ids, head_ids, head_depths, head_alphas,
-            transforms, opacities, colors, x, y,
-            head_count, contributor, active, state)
+            p,
+            amount,
+            mid_ids,
+            head_ids,
+            head_depths,
+            head_alphas,
+            transforms,
+            opacities,
+            colors,
+            x,
+            y,
+            head_count,
+            contributor,
+            active,
+            state,
+        )
         for j in range(mid_count - amount):
             mid_ids[j, p] = mid_ids[j + amount, p]
             mid_depths[j, p] = mid_depths[j + amount, p]
@@ -225,7 +342,11 @@ def _render_3d(
 
 
 @torch.no_grad()
-def render_hierarchical_3d(preprocessed, bins, raster_settings):
+def render_hierarchical_3d(
+    preprocessed: PreprocessedGaussians,
+    bins: TileBins,
+    raster_settings: GaussianRasterizationSettings,
+) -> RenderOutput:
     """Render a 3D AAA scene with StopThePop's 64/8/4 queue structure.
 
     Returns ``color`` (3,H,W), ``final_T`` (H,W) and a diagnostic per-pixel
@@ -234,16 +355,16 @@ def render_hierarchical_3d(preprocessed, bins, raster_settings):
     """
     settings = raster_settings.settings
     if not settings.eval_3D or int(settings.sort_settings.sort_mode) != 3:
-        raise ValueError('requires eval_3D=True and sort_mode=HIER')
+        raise ValueError("requires eval_3D=True and sort_mode=HIER")
     sizes = settings.sort_settings.queue_sizes
     if sizes.tile_4x4 != 64 or sizes.tile_2x2 != 8 or sizes.per_pixel != 4:
-        raise ValueError('only queue sizes 64/8/4 are supported')
+        raise ValueError("only queue sizes 64/8/4 are supported")
     if raster_settings.render_depth:
-        raise ValueError('render_depth is not supported')
-    if 'gauss2screen' not in preprocessed or 'opacity' not in preprocessed:
-        raise ValueError('preprocessed data must contain 3D transforms and opacity')
+        raise ValueError("render_depth is not supported")
+    if "gauss2screen" not in preprocessed or "opacity" not in preprocessed:
+        raise ValueError("preprocessed data must contain 3D transforms and opacity")
     width, height = raster_settings.image_width, raster_settings.image_height
-    device = preprocessed['gauss2screen'].device
+    device = preprocessed["gauss2screen"].device
     pixels = width * height
     # Queue slot first keeps neighboring pixels contiguous for Warp threads.
     ids = torch.empty((64 + 8 + 4, pixels), dtype=torch.int32, device=device)
@@ -253,17 +374,32 @@ def render_hierarchical_3d(preprocessed, bins, raster_settings):
     final_t = torch.empty((height, width), dtype=torch.float32, device=device)
     contributors = torch.empty((height, width), dtype=torch.int32, device=device)
     stream = wp.stream_from_torch(torch.cuda.current_stream(device))
-    wp.launch(_render_3d, dim=pixels, inputs=[
-        width, height, bool(settings.culling_settings.hierarchical_4x4_culling),
-        wp.from_torch(bins['ranges']), wp.from_torch(bins['point_list']),
-        wp.from_torch(preprocessed['gauss2screen'], dtype=wp.mat44),
-        wp.from_torch(preprocessed['opacity']),
-        wp.from_torch(preprocessed['rgb'], dtype=wp.vec3),
-        wp.from_torch(raster_settings.bg.reshape(1, 3), dtype=wp.vec3),
-        wp.from_torch(ids[:64, :]), wp.from_torch(depths[:64, :]),
-        wp.from_torch(ids[64:72, :]), wp.from_torch(depths[64:72, :]),
-        wp.from_torch(ids[72:76, :]), wp.from_torch(depths[72:76, :]),
-        wp.from_torch(alphas)],
-        outputs=[wp.from_torch(color), wp.from_torch(final_t),
-                 wp.from_torch(contributors)], stream=stream)
+    wp.launch(
+        _render_3d,
+        dim=pixels,
+        inputs=[
+            width,
+            height,
+            bool(settings.culling_settings.hierarchical_4x4_culling),
+            wp.from_torch(bins["ranges"]),
+            wp.from_torch(bins["point_list"]),
+            wp.from_torch(preprocessed["gauss2screen"], dtype=wp.mat44),
+            wp.from_torch(preprocessed["opacity"]),
+            wp.from_torch(preprocessed["rgb"], dtype=wp.vec3),
+            wp.from_torch(raster_settings.bg.reshape(1, 3), dtype=wp.vec3),
+            wp.from_torch(ids[:64, :]),
+            wp.from_torch(depths[:64, :]),
+            wp.from_torch(ids[64:72, :]),
+            wp.from_torch(depths[64:72, :]),
+            wp.from_torch(ids[72:76, :]),
+            wp.from_torch(depths[72:76, :]),
+            wp.from_torch(alphas),
+        ],
+        outputs=[
+            wp.from_torch(color),
+            wp.from_torch(final_t),
+            wp.from_torch(contributors),
+        ],
+        stream=stream,
+    )
     return dict(color=color, final_T=final_t, contributors=contributors)

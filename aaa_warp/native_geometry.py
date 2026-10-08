@@ -4,8 +4,8 @@ Formulas from AAA/StopThePop consistent_common.cuh (MIT, Graz University of
 Technology, 2024). The snippet is self-contained and requires no GLM headers
 or separately built extension. Warp rows correspond to reference GLM columns.
 """
-import warp as wp
 
+import warp as wp
 
 GEOMETRY = r"""
     using V3 = wp::vec_t<3, float>;
@@ -76,13 +76,15 @@ GEOMETRY = r"""
 """
 
 
-@wp.func_native(GEOMETRY + 'return sample(g2s, x, y);')
+@wp.func_native(GEOMETRY + "return sample(g2s, x, y);")
 def sample_native(g2s: wp.mat44, x: float, y: float) -> wp.vec2:
     pass
 
 
-@wp.func_native(GEOMETRY + 'return frustum(g2s, x, y, width, height);')
-def frustum_native(g2s: wp.mat44, x: float, y: float, width: float, height: float) -> float:
+@wp.func_native(GEOMETRY + "return frustum(g2s, x, y, width, height);")
+def frustum_native(
+    g2s: wp.mat44, x: float, y: float, width: float, height: float
+) -> float:
     pass
 
 
@@ -93,7 +95,7 @@ def frustum_native(g2s: wp.mat44, x: float, y: float, width: float, height: floa
 # including the first 32 tiles of its load-balanced path. The farther plane
 # and cooperative remaining tiles use FMAs. Preserve those boundaries without
 # changing predicates.
-FRUSTUM_DEPTH = r'''
+FRUSTUM_DEPTH = r"""
 
     using V3 = wp::vec_t<3, float>;
     using V4 = wp::vec_t<4, float>;
@@ -170,15 +172,17 @@ FRUSTUM_DEPTH = r'''
         edge(plane_at(0,x+width*0.5f-dx),ay);
     }
     return wp::vec_t<2,float>(0.5f*best,best_pos[2]/best_pos[3]);
-'''
+"""
 
 
 @wp.func_native(FRUSTUM_DEPTH)
-def frustum_depth_native(g2s:wp.mat44,x:float,y:float,width:float,height:float,sequential:bool)->wp.vec2:
+def frustum_depth_native(
+    g2s: wp.mat44, x: float, y: float, width: float, height: float, sequential: bool
+) -> wp.vec2:
     pass
 
 
-@wp.func_native(r'''
+@wp.func_native(r"""
     using V4=wp::vec_t<4,float>;
     const float pi=3.14159265358979323846f;
     auto dot4=[](V4 a,V4 b) {
@@ -216,12 +220,14 @@ def frustum_depth_native(g2s:wp.mat44,x:float,y:float,width:float,height:float,s
         upper=fminf(upper,hi);
     }
     return wp::vec_t<2,float>(tanf(lower),tanf(upper));
-''')
-def bound_axis_native(g2v:wp.mat44,mean:wp.vec3,cutoff:float,axis:int)->wp.vec2:
+""")
+def bound_axis_native(
+    g2v: wp.mat44, mean: wp.vec3, cutoff: float, axis: int
+) -> wp.vec2:
     pass
 
 
-@wp.func_native(r'''
+@wp.func_native(r"""
     using V4=wp::vec_t<4,float>;
     auto dot4=[](V4 a,V4 b) {
         return (a[0]*b[0]+a[1]*b[1])+(a[2]*b[2]+a[3]*b[3]);
@@ -237,6 +243,6 @@ def bound_axis_native(g2v:wp.mat44,mean:wp.vec3,cutoff:float,axis:int)->wp.vec2:
     if (pz-ez < -1.0f || pz+ez > 1.0f) return V4(0.0f,0.0f,-1.0f,-1.0f);
     float hx=px*px-dot4(f,wp::cw_mul(x,x)), hy=py*py-dot4(f,wp::cw_mul(y,y));
     return V4(px,py,sqrtf(fmaxf(hx,0.0f)),sqrtf(fmaxf(hy,0.0f)));
-''')
-def screen_bounds_native(g2s:wp.mat44,cutoff:float)->wp.vec4:
+""")
+def screen_bounds_native(g2s: wp.mat44, cutoff: float) -> wp.vec4:
     pass

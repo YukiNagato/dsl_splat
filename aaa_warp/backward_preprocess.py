@@ -7,10 +7,18 @@ These are reference semantics, not automatic differentiation of every forward
 operation. See BACKWARD_IMPLEMENTATION.md for their implications.
 """
 
+from .dispatch import FrameBindings, kernel_arg, launch
+from .settings import GaussianRasterizationSettings
+from .types import (
+    GaussianInputs,
+    PreprocessedGaussians,
+    RenderGradients,
+    GaussianGradients,
+)
+
 import torch
 import warp as wp
 
-from .dispatch import kernel_arg, launch
 from .geometry import load_camera
 from .interop import current_stream
 
@@ -260,14 +268,19 @@ def preprocess_adjoint(
 
 @torch.no_grad()
 def backward_preprocess(
-    inputs, state, render_gradients, raster_settings, *, _bindings=None
-):
+    inputs: GaussianInputs,
+    state: PreprocessedGaussians,
+    render_gradients: RenderGradients,
+    raster_settings: GaussianRasterizationSettings,
+    *,
+    _bindings: FrameBindings | None = None,
+) -> GaussianGradients:
     n = inputs["means3D"].shape[0]
     device = inputs["means3D"].device
     sh = inputs.get("shs")
     m = 0 if sh is None else sh.shape[1]
     allocation = dict(device=device, dtype=torch.float32)
-    gradients = dict(
+    gradients: GaussianGradients = dict(
         means3D=torch.empty((n, 3), **allocation),
         means2D=torch.zeros((n, 3), **allocation),
         scales=torch.empty((n, 3), **allocation),

@@ -1,9 +1,11 @@
 """Torch/Warp stream interoperability, including externally captured streams."""
+
+from .dispatch import FrameBindings
 import torch
 import warp as wp
 
 
-def contiguous_features(tensor):
+def contiguous_features(tensor: torch.Tensor) -> torch.Tensor:
     """Canonical inner strides for Warp's fixed-length vector descriptors.
 
     Torch regards empty/singleton dimensions as contiguous even when their
@@ -15,7 +17,9 @@ def contiguous_features(tensor):
     return value
 
 
-def current_stream(device, *, bindings=None):
+def current_stream(
+    device: torch.device | str | int, *, bindings: FrameBindings | None = None
+) -> wp.Stream:
     """Reuse the active Warp wrapper when it is already Torch's current stream.
 
     Creating and destroying another wrapper for an externally captured stream

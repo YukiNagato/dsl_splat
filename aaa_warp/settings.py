@@ -3,10 +3,13 @@
 Importing settings never imports the reference CUDA extension. Enum values,
 defaults and serialized fields follow the reference Python settings.
 """
+
+from copy import copy
 from dataclasses import asdict, dataclass, field
 from enum import IntEnum
 import json
-from typing import NamedTuple
+from pathlib import Path
+from typing import Any, NamedTuple
 
 import torch
 
@@ -56,38 +59,54 @@ class ExtendedSettings:
     eval_3D: bool = False
     new_aabb: bool = True
 
-    def to_dict(self):
-        return asdict(self, dict_factory=lambda items: {
-            key: int(value) if isinstance(value, IntEnum) else value for key, value in items})
+    def copy(self) -> "ExtendedSettings":
+        """Snapshot all mutable settings nodes without recursive deepcopy."""
+        return copy_settings(self)
 
-    def to_json(self):
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(
+            self,
+            dict_factory=lambda items: {
+                key: int(value) if isinstance(value, IntEnum) else value
+                for key, value in items
+            },
+        )
+
+    def to_json(self) -> str:
         return json.dumps(self.to_dict())
 
     @staticmethod
-    def from_dict(values):
+    def from_dict(values: dict[str, Any]) -> "ExtendedSettings":
         values = dict(values)
-        sort = dict(values.pop('sort_settings', {}))
-        queues = SortQueueSizes(**sort.pop('queue_sizes', {}))
-        if 'sort_mode' in sort:
-            sort['sort_mode'] = SortMode(sort['sort_mode'])
-        if 'sort_order' in sort:
-            sort['sort_order'] = GlobalSortOrder(sort['sort_order'])
-        culling = CullingSettings(**values.pop('culling_settings', {}))
-        return ExtendedSettings(sort_settings=SortSettings(queue_sizes=queues, **sort),
-                                culling_settings=culling, **values)
+        sort = dict(values.pop("sort_settings", {}))
+        queues = SortQueueSizes(**sort.pop("queue_sizes", {}))
+        if "sort_mode" in sort:
+            sort["sort_mode"] = SortMode(sort["sort_mode"])
+        if "sort_order" in sort:
+            sort["sort_order"] = GlobalSortOrder(sort["sort_order"])
+        culling = CullingSettings(**values.pop("culling_settings", {}))
+        return ExtendedSettings(
+            sort_settings=SortSettings(queue_sizes=queues, **sort),
+            culling_settings=culling,
+            **values,
+        )
 
     @staticmethod
-    def from_json(path):
+    def from_json(path: str | Path) -> "ExtendedSettings":
         with open(path) as source:
             return ExtendedSettings.from_dict(json.load(source))
 
-    def set_value(self, key, value):
-        for settings in (self, self.culling_settings, self.sort_settings,
-                         self.sort_settings.queue_sizes):
+    def set_value(self, key: str, value: Any) -> None:
+        for settings in (
+            self,
+            self.culling_settings,
+            self.sort_settings,
+            self.sort_settings.queue_sizes,
+        ):
             if key in settings.__dataclass_fields__:
                 setattr(settings, key, value)
                 return
-        raise ValueError(f'unknown setting: {key}')
+        raise ValueError(f"unknown setting: {key}")
 
 
 class GaussianRasterizationSettings(NamedTuple):
@@ -106,3 +125,12 @@ class GaussianRasterizationSettings(NamedTuple):
     settings: ExtendedSettings
     render_depth: bool
     debug: bool
+
+
+def copy_settings(settings: ExtendedSettings) -> ExtendedSettings:
+    """Copy the four mutable nodes, including structurally compatible settings."""
+    result = copy(settings)
+    result.sort_settings = copy(settings.sort_settings)
+    result.sort_settings.queue_sizes = copy(settings.sort_settings.queue_sizes)
+    result.culling_settings = copy(settings.culling_settings)
+    return result

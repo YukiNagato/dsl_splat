@@ -4,20 +4,25 @@ No per-pixel Gaussian history is stored. CUDA's front-to-back derivative uses
 the saved final image/transmittance and the same blending sequence.
 """
 
+from .dispatch import FrameBindings, kernel_arg, launch
+from .settings import GaussianRasterizationSettings
+from .types import PreprocessedGaussians, TileBins, RenderOutput, RenderGradients
+
 from functools import cache
 
 import torch
 import warp as wp
 
 from .backward_intrinsics import global_atomic_add
-from .dispatch import kernel_arg, launch
 from .interop import current_stream, contiguous_features
 from .render_adjoint import RenderAdjoint, _make_accumulate_ray_gradient
 from .render_hierarchical_warp import INF, _pixel_type, _make_evaluation
 
 
 @cache
-def _make_blend_backward(channels, screen_grad=False, absgrad=False):
+def _make_blend_backward(
+    channels: int, screen_grad: bool = False, absgrad: bool = False
+) -> wp.Function:
     Pixel = _pixel_type(channels)
     feature_type = wp.types.vector(channels, wp.float32)
     accumulate_ray_gradient = _make_accumulate_ray_gradient(screen_grad, absgrad)
@@ -67,7 +72,9 @@ def _make_blend_backward(channels, screen_grad=False, absgrad=False):
 
 
 @cache
-def _make_backward(cull, channels=3, screen_grad=False, absgrad=False):
+def _make_backward(
+    cull: bool, channels: int = 3, screen_grad: bool = False, absgrad: bool = False
+) -> wp.Kernel:
     feature_type = wp.types.vector(channels, wp.float32)
     evaluate = _make_evaluation(
         cull, _make_blend_backward(channels, screen_grad, absgrad), True, channels
@@ -130,16 +137,16 @@ def _make_backward(cull, channels=3, screen_grad=False, absgrad=False):
 
 @torch.no_grad()
 def backward_render(
-    preprocessed,
-    bins,
-    output,
-    grad_color,
-    raster_settings,
+    preprocessed: PreprocessedGaussians,
+    bins: TileBins,
+    output: RenderOutput,
+    grad_color: torch.Tensor,
+    raster_settings: GaussianRasterizationSettings,
     *,
-    screen_grad=False,
-    absgrad=False,
-    _bindings=None,
-):
+    screen_grad: bool = False,
+    absgrad: bool = False,
+    _bindings: FrameBindings | None = None,
+) -> RenderGradients:
     """Return dFeatures, dOpacity and transposed transform gradients.
 
     The legacy ``rgb`` gradient key has shape (N,C).
@@ -178,7 +185,7 @@ def backward_render(
         n * (17 + channels + screen_channels), device=device, dtype=torch.float32
     )
     opacity_end = n * (17 + channels)
-    gradients = dict(
+    gradients: RenderGradients = dict(
         gauss2screen=storage[: n * 16].view(n, 4, 4),
         rgb=storage[n * 16 : n * (16 + channels)].view(n, channels),
         opacity=storage[n * (16 + channels) : opacity_end],

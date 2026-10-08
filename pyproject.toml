@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aaa-gaussians-warp"
+version = "0.1.0"
+description = "AAA Gaussian rasterization with Python-managed NVIDIA Warp JIT"
+readme = "aaa_warp/README.md"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.0", "warp-lang>=1.17"]
+license = {file = "aaa_warp/LICENSE.md"}
+
+[tool.setuptools.packages.find]
+include = ["aaa_warp*"]
+
+[tool.black]
+target-version = ["py310"]
+force-exclude = '/render_hierarchical_native\.py$'
+
+# wp.array(...) annotations belong to Warp's compiler. Check the host boundary;
+# GPU kernels are validated through compilation and CUDA parity tests.
+[tool.mypy]
+python_version = "3.10"
+follow_imports = "skip"
+ignore_missing_imports = true
+files = [
+    "aaa_warp/types.py", "aaa_warp/frame.py", "aaa_warp/settings.py",
+    "aaa_warp/dispatch.py", "aaa_warp/interop.py", "aaa_warp/autograd.py",
+    "aaa_warp/rasterizer.py", "aaa_warp/render.py", "aaa_warp/gsplat.py",
+    "aaa_warp/compat",
+]

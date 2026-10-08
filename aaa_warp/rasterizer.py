@@ -2,9 +2,11 @@
 
 import torch
 
-from .dispatch import FrameBindings, LaunchCache
+from .dispatch import LaunchCache
 from .binning import bin_and_sort
-from .preprocess import preprocess
+from .frame import FrameOptions, prepare_frame
+from .settings import GaussianRasterizationSettings
+from .types import GaussianInputs, Renderer, RasterizationOutput
 from .render import render_hierarchical_3d, native_renderer, warp_renderer
 
 
@@ -28,7 +30,13 @@ class GaussianRasterizer(torch.nn.Module):
     are not supported; filter3D is constant, matching the reference API.
     """
 
-    def __init__(self, raster_settings=None, *, renderer=None, channels=None):
+    def __init__(
+        self,
+        raster_settings: GaussianRasterizationSettings | None = None,
+        *,
+        renderer: Renderer | None = None,
+        channels: int | None = None,
+    ) -> None:
         super().__init__()
         if channels is not None and (
             isinstance(channels, bool) or not isinstance(channels, int) or channels <= 0
@@ -41,21 +49,21 @@ class GaussianRasterizer(torch.nn.Module):
 
     def forward(
         self,
-        means3D,
-        means2D=None,
-        opacities=None,
-        filter3D=None,
-        shs=None,
-        colors_precomp=None,
-        scales=None,
-        rotations=None,
-        cov3D_precomp=None,
+        means3D: torch.Tensor,
+        means2D: torch.Tensor | None = None,
+        opacities: torch.Tensor | None = None,
+        filter3D: torch.Tensor | None = None,
+        shs: torch.Tensor | None = None,
+        colors_precomp: torch.Tensor | None = None,
+        scales: torch.Tensor | None = None,
+        rotations: torch.Tensor | None = None,
+        cov3D_precomp: torch.Tensor | None = None,
         *,
-        raster_settings=None,
-        return_aux=False,
-        features=None,
-        _stage_options=None,
-    ):
+        raster_settings: GaussianRasterizationSettings | None = None,
+        return_aux: bool = False,
+        features: torch.Tensor | None = None,
+        _stage_options: FrameOptions | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor] | RasterizationOutput:
         config = (
             raster_settings if raster_settings is not None else self.raster_settings
         )
@@ -84,7 +92,7 @@ class GaussianRasterizer(torch.nn.Module):
             raise ValueError(
                 "the native RGB baseline requires 3 channels; use the default or Python/Warp renderer"
             )
-        inputs = dict(
+        inputs: GaussianInputs = dict(
             means3D=means3D,
             opacities=opacities,
             filter3D=filter3D,
@@ -129,7 +137,7 @@ class GaussianRasterizer(torch.nn.Module):
                 raise ValueError(
                     "backward supports the native and Python/Warp hierarchical renderers"
                 )
-            output = rasterize_with_grad(
+            differentiable = rasterize_with_grad(
                 inputs,
                 means2D,
                 config,
@@ -138,23 +146,10 @@ class GaussianRasterizer(torch.nn.Module):
                 _stage_options,
             )
             if return_aux:
-                return output
-            return output["color"], output["radii"]
-        options = {} if _stage_options is None else _stage_options
-        bindings = options.get("bindings") or FrameBindings(self._launch_cache)
-        state = options.get("preprocessed")
-        if state is None:
-            state = preprocess(
-                **inputs,
-                raster_settings=config,
-                principal_point=options.get("principal_point"),
-                _bindings=bindings,
-            )
-        if _stage_options is not None and "preprocessed" not in options:
-            from .autograd import _stage_options as apply_stage_options
-
-            with torch.no_grad():
-                apply_stage_options(state, _stage_options)
+                return differentiable
+            return differentiable["color"], differentiable["radii"]
+        frame = prepare_frame(inputs, config, self._launch_cache, _stage_options)
+        state, bindings = frame.state, frame.bindings
         bins = bin_and_sort(state, config, diagnostics=False, _bindings=bindings)
         output = self._renderer(state, bins, config, _bindings=bindings)
         if state["radii"].numel() == 0:
@@ -163,5 +158,10 @@ class GaussianRasterizer(torch.nn.Module):
             # still writes the background; apply the wrapper's special case here.
             output["color"].zero_()
         if return_aux:
-            return dict(output, radii=state["radii"])
+            return RasterizationOutput(
+                color=output["color"],
+                radii=state["radii"],
+                final_T=output["final_T"],
+                contributors=output["contributors"],
+            )
         return output["color"], state["radii"]

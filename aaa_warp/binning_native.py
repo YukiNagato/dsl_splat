@@ -1,10 +1,10 @@
 """AAA duplicate scheduling, compiled automatically by Warp's native JIT."""
+
 import warp as wp
 
 from .native_geometry import FRUSTUM_DEPTH
 
-
-_BODY = r'''
+_BODY = r"""
     const unsigned mask = 0xffffffffu;
     const int lane = threadIdx.x & 31;
     const int gx = (width + 15) / 16, gy = (height + 15) / 16;
@@ -79,31 +79,57 @@ _BODY = r'''
             values.data[j]=-1;
         }
     }
-'''
+"""
 
 
-@wp.func_native('auto evaluate = [](const wp::mat_t<4,4,float>& g2s, float x, float y, '
-                'float width, float height, bool sequential) {\n' + FRUSTUM_DEPTH + '\n};\n' + _BODY)
-def _duplicate_cooperative(i: int,
-    centers: wp.array(dtype=wp.vec2), extents: wp.array(dtype=wp.vec2),
-    radii: wp.array(dtype=int), transforms: wp.array(dtype=wp.mat44),
-    opacity3d: wp.array(dtype=float), offsets: wp.array(dtype=int),
-    width: int, height: int,
-    keys: wp.array(dtype=wp.uint64), values: wp.array(dtype=int)):
+@wp.func_native(
+    "auto evaluate = [](const wp::mat_t<4,4,float>& g2s, float x, float y, "
+    "float width, float height, bool sequential) {\n" + FRUSTUM_DEPTH + "\n};\n" + _BODY
+)
+def _duplicate_cooperative(
+    i: int,
+    centers: wp.array(dtype=wp.vec2),
+    extents: wp.array(dtype=wp.vec2),
+    radii: wp.array(dtype=int),
+    transforms: wp.array(dtype=wp.mat44),
+    opacity3d: wp.array(dtype=float),
+    offsets: wp.array(dtype=int),
+    width: int,
+    height: int,
+    keys: wp.array(dtype=wp.uint64),
+    values: wp.array(dtype=int),
+):
     pass
 
 
-@wp.kernel(module='unique', enable_backward=False, launch_bounds=32)
+@wp.kernel(module="unique", enable_backward=False, launch_bounds=32)
 def duplicate_aaa_default(
-    centers: wp.array(dtype=wp.vec2), extents: wp.array(dtype=wp.vec2),
-    radii: wp.array(dtype=int), transforms: wp.array(dtype=wp.mat44),
-    opacity3d: wp.array(dtype=float), offsets: wp.array(dtype=int),
-    width: int, height: int,
-    keys: wp.array(dtype=wp.uint64), values: wp.array(dtype=int)):
+    centers: wp.array(dtype=wp.vec2),
+    extents: wp.array(dtype=wp.vec2),
+    radii: wp.array(dtype=int),
+    transforms: wp.array(dtype=wp.mat44),
+    opacity3d: wp.array(dtype=float),
+    offsets: wp.array(dtype=int),
+    width: int,
+    height: int,
+    keys: wp.array(dtype=wp.uint64),
+    values: wp.array(dtype=int),
+):
     # Launch a rounded number of threads: padded lanes must join collectives.
-    _duplicate_cooperative(wp.tid(),centers,extents,radii,transforms,opacity3d,
-                           offsets,width,height,keys,values)
+    _duplicate_cooperative(
+        wp.tid(),
+        centers,
+        extents,
+        radii,
+        transforms,
+        opacity3d,
+        offsets,
+        width,
+        height,
+        keys,
+        values,
+    )
 
 
-def duplicate_dim(kernel, n):
-    return ((n+31)//32)*32 if kernel is duplicate_aaa_default else n
+def duplicate_dim(kernel: wp.Kernel, n: int) -> int:
+    return ((n + 31) // 32) * 32 if kernel is duplicate_aaa_default else n
