@@ -2,7 +2,7 @@
 
 import math
 from numbers import Integral
-from typing import Literal, cast
+from typing import Literal
 
 import torch
 from torch import Tensor
@@ -20,7 +20,6 @@ from ..types import GaussianInputs
 from .gsplat_cameras import Cameras, prepare_cameras
 from .gsplat_inputs import (
     Inputs,
-    ViewFeatures,
     RenderMode,
     normalize_inputs,
     spherical_harmonics,
@@ -84,8 +83,11 @@ def _validate_options(
         raise NotImplementedError("AAA's adaptive filter currently has fixed eps2d=0.3")
     if tile_size not in (None, 16):
         raise NotImplementedError("AAA's hierarchy requires tile_size=16")
-    if render_mode not in ("RGB", "D", "ED", "RGB+D", "RGB+ED"):
-        raise NotImplementedError(f"unsupported render_mode: {render_mode}")
+    if render_mode != "RGB":
+        raise NotImplementedError(
+            "AAA/Warp supports render_mode='RGB' for RGB or arbitrary features; "
+            "depth rendering is not implemented"
+        )
     if rasterize_mode not in ("classic", "antialiased"):
         raise ValueError("rasterize_mode must be 'classic' or 'antialiased'")
     if any(
@@ -113,37 +115,23 @@ def _validate_options(
 def _prepare_frames(
     layout: Inputs,
     cameras: Cameras,
-    render_mode: RenderMode,
     sh_degree: int | None,
     settings: ExtendedSettings,
     radius_clip: float,
-    near_plane: float,
-    far_plane: float,
 ) -> list[ViewFrame]:
     frames: list[ViewFrame] = []
-    has_rgb, has_depth = "RGB" in render_mode, "D" in render_mode
-    colors = cast(ViewFeatures, layout.colors)
+    colors = layout.colors
     ones = torch.ones(layout.n, 1, device=layout.device, dtype=torch.float32)
     for batch in range(layout.batch_count):
         for camera in range(layout.cameras):
-            view, means = cameras.views[batch, camera], layout.means[batch]
-            positions = means if has_depth else means.detach()
-            points = positions @ view[:3, :3].T + view[:3, 3]
-            z = points[:, 2]
-            opacity = torch.where(
-                (z > near_plane) & (z < far_plane), layout.opacities[batch], 0
-            )
-            fx, fy, cx, cy = cameras.intrinsics[batch][camera]
-            attributes: list[Tensor] = []
-            if has_rgb:
-                value = colors.at(batch, camera)
-                if sh_degree is not None:
-                    value = spherical_harmonics(
-                        value, means - cameras.centers[batch, camera], sh_degree
-                    )
-                attributes.append(value)
-            if has_depth:
-                attributes.append(z[:, None])
+            means = layout.means[batch]
+            _, _, cx, cy = cameras.intrinsics[batch][camera]
+            value = colors.at(batch, camera)
+            if sh_degree is not None:
+                value = spherical_harmonics(
+                    value, means - cameras.centers[batch, camera], sh_degree
+                )
+            attributes: list[Tensor] = [value]
             if layout.extras is not None:
                 attributes.append(layout.extras.at(batch, camera))
             attributes.append(ones)
@@ -151,14 +139,14 @@ def _prepare_frames(
             background = torch.zeros(
                 features.shape[-1], device=layout.device, dtype=torch.float32
             )
-            if has_rgb and layout.backgrounds is not None:
+            if layout.backgrounds is not None:
                 background[: colors.channels] = layout.backgrounds[batch, camera]
             config = cameras.config(batch, camera, background, settings)
             inputs: GaussianInputs = dict(
                 means3D=means,
                 rotations=layout.quats[batch],
                 scales=layout.scales[batch],
-                opacities=opacity,
+                opacities=layout.opacities[batch],
                 colors_precomp=features,
                 filter3D=None if layout.filters is None else layout.filters[batch],
             )
@@ -175,7 +163,6 @@ def _prepare_frames(
                     config,
                     inputs,
                     prepared,
-                    points,
                     cameras.intrinsics[batch][camera],
                 )
             )
@@ -226,14 +213,16 @@ def rasterization(
     """Return (render_colors, render_alphas, meta) with gsplat tensor layouts.
 
     Supports arbitrary Gaussian batch dimensions, C pinhole cameras, shared or
-    per-camera features/SH0–3, packed/dense metadata, radius/near/far culling,
-    RGB/D/ED/RGB+D/RGB+ED, and first-order Gaussian/feature/alpha/depth gradients.
+    per-camera features/SH0–3, packed/dense metadata, radius culling,
+    RGB/arbitrary features, and first-order Gaussian/feature/alpha gradients.
     Cameras are rendered sequentially on Torch's current CUDA stream.
 
     Inputs are activated scales/opacities and wxyz quaternions (normalized here).
-    Output layouts are (...,C,H,W,D) and (...,C,H,W,1). Depth uses Gaussian
-    center view-space Z; ED divides accumulated depth by alpha (floor 1e-10).
+    Output layouts are (...,C,H,W,D) and (...,C,H,W,1).
     Alpha is blended as a constant-one feature, so it remains differentiable.
+    Only render_mode='RGB' is supported; depth modes raise NotImplementedError.
+    near_plane/far_plane build the projection matrix; Gaussian culling follows
+    AAA's 3D frustum-contribution test, with no additional center-Z clipping.
 
     Always uses AAA eval_3D; explicitly requesting with_eval3d=False is rejected.
     eps2d is fixed at 0.3; rasterize_mode controls AAA opacity compensation.
@@ -287,7 +276,6 @@ def rasterization(
         backgrounds,
         extra_signals,
         filter3D,
-        render_mode,
         sh_degree,
     )
     cameras = prepare_cameras(layout, width, height, near_plane, far_plane)
@@ -307,19 +295,15 @@ def rasterization(
     frames = _prepare_frames(
         layout,
         cameras,
-        render_mode,
         sh_degree,
         settings,
         radius_clip,
-        near_plane,
-        far_plane,
     )
     meta, screen, options = build_metadata(
         frames, layout, width, height, packed=packed, absgrad=absgrad
     )
-    channels = cast(ViewFeatures, layout.colors).channels if "RGB" in render_mode else 0
+    channels = layout.colors.channels
     extra_channels = 0 if layout.extras is None else layout.extras.channels
-    has_depth = "D" in render_mode
     outputs: list[Tensor] = []
     alphas: list[Tensor] = []
     extras: list[Tensor] = []
@@ -335,20 +319,12 @@ def rasterization(
         if layout.n == 0:
             image = image + frame.config.bg
         alpha = image[..., -1:]
-        rendered = image[..., : channels + int(has_depth)]
-        if render_mode in ("ED", "RGB+ED"):
-            rendered = torch.cat(
-                (rendered[..., :-1], rendered[..., -1:] / alpha.clamp_min(1e-10)),
-                dim=-1,
-            )
-        outputs.append(rendered)
+        outputs.append(image[..., :channels])
         alphas.append(alpha)
         if layout.extras is not None:
-            extras.append(image[..., channels + int(has_depth) : -1])
+            extras.append(image[..., channels:-1])
     image_shape = layout.batch_dims + (layout.cameras, height, width)
-    render_colors = torch.stack(outputs).reshape(
-        image_shape + (channels + int(has_depth),)
-    )
+    render_colors = torch.stack(outputs).reshape(image_shape + (channels,))
     render_alphas = torch.stack(alphas).reshape(image_shape + (1,))
     if extras:
         meta["render_extra_signals"] = torch.stack(extras).reshape(

@@ -37,7 +37,7 @@ class Inputs:
     opacities: Tensor
     viewmats: Tensor
     Ks: Tensor
-    colors: ViewFeatures | None
+    colors: ViewFeatures
     backgrounds: Tensor | None
     extras: ViewFeatures | None
     filters: Tensor | None
@@ -145,7 +145,6 @@ def normalize_inputs(
     backgrounds: Tensor | None,
     extras: Tensor | None,
     filter3D: Tensor | None,
-    render_mode: RenderMode,
     sh_degree: int | None,
 ) -> Inputs:
     """Check layouts once and normalize quaternions with Torch gradients."""
@@ -180,25 +179,20 @@ def normalize_inputs(
         raise ValueError("at least one camera is required")
     check_tensor("Ks", Ks, device, batch_dims + (cameras, 3, 3))
     if colors is None:
-        if "RGB" in render_mode:
-            raise ValueError("colors is required for RGB render modes")
-        if sh_degree is not None:
-            raise ValueError("sh_degree requires colors")
-        color_bank, d = None, 0
-    else:
-        color_bank = _view_values(
-            "colors",
-            colors,
-            batch_dims,
-            batch_count,
-            cameras,
-            n,
-            device,
-            sh=sh_degree is not None,
-        )
-        if sh_degree is not None and color_bank.values.shape[-2] < (sh_degree + 1) ** 2:
-            raise ValueError("not enough SH coefficients for sh_degree")
-        d = color_bank.channels
+        raise ValueError("colors is required for RGB/features rendering")
+    color_bank = _view_values(
+        "colors",
+        colors,
+        batch_dims,
+        batch_count,
+        cameras,
+        n,
+        device,
+        sh=sh_degree is not None,
+    )
+    if sh_degree is not None and color_bank.values.shape[-2] < (sh_degree + 1) ** 2:
+        raise ValueError("not enough SH coefficients for sh_degree")
+    d = color_bank.channels
     background_bank = None
     if backgrounds is not None:
         check_tensor("backgrounds", backgrounds, device, batch_dims + (cameras, d))

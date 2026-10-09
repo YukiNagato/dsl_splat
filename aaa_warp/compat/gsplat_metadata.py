@@ -30,7 +30,6 @@ class Metadata(TypedDict):
     gaussian_ids: Tensor | None
     radii: Tensor
     means2d: Tensor
-    depths: Tensor
     opacities: Tensor
     tiles_per_gauss: Tensor
 
@@ -46,18 +45,23 @@ class ViewFrame:
     config: GaussianRasterizationSettings
     inputs: GaussianInputs
     prepared: PreparedFrame
-    points: Tensor
     intrinsics: tuple[float, float, float, float]
 
 
 @torch.no_grad()
 def _geometry(frames: list[ViewFrame], layout: Inputs) -> dict[str, Tensor]:
     values: dict[str, list[Tensor]] = {
-        name: []
-        for name in ("radii", "means2d", "depths", "opacities", "tiles_per_gauss")
+        name: [] for name in ("radii", "means2d", "opacities", "tiles_per_gauss")
     }
     for frame in frames:
-        state, points = frame.prepared.state, frame.points
+        state = frame.prepared.state
+        # Auxiliary projected-center metadata for densification only. Rendering
+        # and culling use the AAA stages; this no-grad projection changes neither.
+        view, means = (
+            layout.viewmats[frame.batch, frame.camera],
+            layout.means[frame.batch],
+        )
+        points = means @ view[:3, :3].T + view[:3, 3]
         fx, fy, cx, cy = frame.intrinsics
         z = points[:, 2]
         valid = state["radii"] > 0
@@ -72,7 +76,6 @@ def _geometry(frames: list[ViewFrame], layout: Inputs) -> dict[str, Tensor]:
             torch.where(valid[:, None], state["rects2D"].ceil().to(torch.int32), 0)
         )
         values["means2d"].append(torch.where(valid[:, None], screen, 0))
-        values["depths"].append(torch.where(valid, z, 0))
         values["opacities"].append(torch.where(valid, state["opacity"], 0))
         values["tiles_per_gauss"].append(state["tiles_touched"])
     return {
@@ -126,7 +129,6 @@ def build_metadata(
         gaussian_ids=gaussian_ids,
         radii=geometry["radii"],
         means2d=geometry["means2d"],
-        depths=geometry["depths"],
         opacities=geometry["opacities"],
         tiles_per_gauss=geometry["tiles_per_gauss"],
     )

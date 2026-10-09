@@ -12,7 +12,6 @@ from .gsplat_inputs import Inputs
 
 @dataclass(slots=True)
 class Cameras:
-    views: Tensor
     transposed_views: Tensor
     projection: Tensor
     inverse_projection: Tensor
@@ -88,7 +87,6 @@ def prepare_cameras(
         for batch in intrinsics.tolist()
     ]
     return Cameras(
-        views,
         views.transpose(-1, -2).contiguous(),
         full,
         inverse_full,
