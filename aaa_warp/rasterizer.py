@@ -3,11 +3,10 @@
 import torch
 
 from .dispatch import LaunchCache
-from .binning import bin_and_sort
-from .frame import FrameOptions, prepare_frame
+from .frame import FrameOptions
 from .settings import GaussianRasterizationSettings
 from .types import GaussianInputs, Renderer, RasterizationOutput
-from .render import render_hierarchical_3d, native_renderer, warp_renderer
+from .render import render_hierarchical_3d, native_renderer
 
 
 class GaussianRasterizer(torch.nn.Module):
@@ -102,20 +101,6 @@ class GaussianRasterizer(torch.nn.Module):
             rotations=rotations,
             cov3D_precomp=cov3D_precomp,
         )
-        camera_inputs = (
-            config.bg,
-            config.viewmatrix,
-            config.projmatrix,
-            config.inv_viewprojmatrix,
-            config.campos,
-        )
-        if torch.is_grad_enabled() and any(
-            isinstance(value, torch.Tensor) and value.requires_grad
-            for value in camera_inputs
-        ):
-            raise ValueError(
-                "camera/background backward is not implemented; use torch.no_grad() for inference"
-            )
         if config.render_depth:
             raise ValueError("render_depth is not supported")
         if (
@@ -123,45 +108,16 @@ class GaussianRasterizer(torch.nn.Module):
             or int(config.settings.sort_settings.sort_mode) != 3
         ):
             raise ValueError("renderer currently supports eval_3D=True, sort_mode=HIER")
-        if torch.is_grad_enabled() and any(
-            isinstance(value, torch.Tensor) and value.requires_grad
-            for value in (*inputs.values(), means2D)
-        ):
-            from .autograd import rasterize_with_grad
+        from .autograd import rasterize
 
-            if self._renderer not in (
-                render_hierarchical_3d,
-                native_renderer,
-                warp_renderer,
-            ):
-                raise ValueError(
-                    "backward supports the native and Python/Warp hierarchical renderers"
-                )
-            differentiable = rasterize_with_grad(
-                inputs,
-                means2D,
-                config,
-                self._renderer,
-                self._launch_cache,
-                _stage_options,
-            )
-            if return_aux:
-                return differentiable
-            return differentiable["color"], differentiable["radii"]
-        frame = prepare_frame(inputs, config, self._launch_cache, _stage_options)
-        state, bindings = frame.state, frame.bindings
-        bins = bin_and_sort(state, config, diagnostics=False, _bindings=bindings)
-        output = self._renderer(state, bins, config, _bindings=bindings)
-        if state["radii"].numel() == 0:
-            # rasterize_points.cu skips Rasterizer::forward for P=0 and leaves
-            # its initially zero color intact. Low-level empty-tile rendering
-            # still writes the background; apply the wrapper's special case here.
-            output["color"].zero_()
+        output = rasterize(
+            inputs,
+            means2D,
+            config,
+            self._renderer,
+            self._launch_cache,
+            _stage_options,
+        )
         if return_aux:
-            return RasterizationOutput(
-                color=output["color"],
-                radii=state["radii"],
-                final_T=output["final_T"],
-                contributors=output["contributors"],
-            )
-        return output["color"], state["radii"]
+            return output
+        return output["color"], output["radii"]

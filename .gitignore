@@ -1,2 +1,20 @@
-.ipynb_checkpoints
-tests
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+build/
+*.egg-info/
+dist/
+.pytest_cache/
+*.whl
+
+# Local reference implementations and archived development experiments.
+/3dgs-warp-scratch/
+/AAA-Gaussians-Rasterization/
+/research/
+
+# Generated benchmark output; reproducible scripts live in tests/.
+/benchmarks/
+
+# Downloaded models and rendered demonstration artifacts.
+/data/
+/outputs/

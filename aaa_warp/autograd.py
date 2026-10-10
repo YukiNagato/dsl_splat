@@ -10,6 +10,7 @@ from .backward_render import backward_render
 from .binning import bin_and_sort
 from .dispatch import FrameBindings, LaunchCache
 from .frame import FrameOptions, prepare_frame
+from .render import render_hierarchical_3d, native_renderer, warp_renderer
 from .settings import GaussianRasterizationSettings, copy_settings
 from .types import GaussianInputs, Renderer, RasterizationOutput
 
@@ -44,6 +45,7 @@ class Rasterize(torch.autograd.Function):
         renderer: Renderer,
         launch_cache: LaunchCache,
         stage_options: FrameOptions | None,
+        grad_enabled: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         values = (
             means3D,
@@ -57,12 +59,39 @@ class Rasterize(torch.autograd.Function):
             cov3D_precomp,
         )
         inputs = cast(GaussianInputs, dict(zip(INPUT_NAMES, values)))
+        # Function.forward always runs without grad recording. needs_input_grad
+        # describes its input tensors even under an outer no_grad/inference_mode,
+        # so combine it with the caller's mode before preparing backward state.
+        needs_backward = grad_enabled and any(ctx.needs_input_grad[: len(INPUT_NAMES)])
+        if grad_enabled and any(
+            isinstance(value, torch.Tensor) and value.requires_grad
+            for value in (getattr(config, name) for name in CAMERA_NAMES)
+        ):
+            raise ValueError(
+                "camera/background backward is not implemented; use torch.no_grad() for inference"
+            )
+        if needs_backward and renderer not in (
+            render_hierarchical_3d,
+            native_renderer,
+            warp_renderer,
+        ):
+            raise ValueError(
+                "backward supports the native and Python/Warp hierarchical renderers"
+            )
         frame = prepare_frame(inputs, config, launch_cache, stage_options)
         state, bindings = frame.state, frame.bindings
         bins = bin_and_sort(state, config, diagnostics=False, _bindings=bindings)
         output = renderer(state, bins, config, _bindings=bindings)
         if means3D.shape[0] == 0:
             output["color"].zero_()
+        result = (
+            output["color"],
+            state["radii"],
+            output["final_T"],
+            output["contributors"],
+        )
+        if not needs_backward:
+            return result
         # Keep every frame's own intermediates. Save via Torch so in-place
         # changes to inputs/camera/auxiliary outputs are detected by autograd.
         named: list[tuple[str, str, torch.Tensor]] = []
@@ -97,12 +126,7 @@ class Rasterize(torch.autograd.Function):
             state["radii"], output["final_T"], output["contributors"]
         )
         ctx.set_materialize_grads(False)
-        return (
-            output["color"],
-            state["radii"],
-            output["final_T"],
-            output["contributors"],
-        )
+        return result
 
     @staticmethod
     @once_differentiable
@@ -114,7 +138,7 @@ class Rasterize(torch.autograd.Function):
         grad_contributors: torch.Tensor | None,
     ) -> tuple[torch.Tensor | None, ...]:
         if grad_color is None:
-            return (None,) * 13
+            return (None,) * len(ctx.needs_input_grad)
         mappings: dict[str, dict[str, torch.Tensor]] = {
             name: {} for name in ("inputs", "state", "bins", "output", "camera")
         }
@@ -139,8 +163,12 @@ class Rasterize(torch.autograd.Function):
             inputs, mappings["state"], render_gradients, config, _bindings=bindings
         )
         result: list[torch.Tensor | None] = []
-        for name in INPUT_NAMES:
-            if name not in inputs or name in ("filter3D", "cov3D_precomp"):
+        for index, name in enumerate(INPUT_NAMES):
+            if (
+                not ctx.needs_input_grad[index]
+                or name not in inputs
+                or name in ("filter3D", "cov3D_precomp")
+            ):
                 result.append(None)
             elif name == "means2D":
                 # Original AAA 3D calls retain their zero dummy gradient. The
@@ -155,10 +183,10 @@ class Rasterize(torch.autograd.Function):
                 )
             else:
                 result.append(gradients[name].reshape_as(inputs[name]))
-        return (*result, None, None, None, None)
+        return (*result, None, None, None, None, None)
 
 
-def rasterize_with_grad(
+def rasterize(
     inputs: GaussianInputs,
     means2D: torch.Tensor | None,
     config: GaussianRasterizationSettings,
@@ -166,6 +194,7 @@ def rasterize_with_grad(
     launch_cache: LaunchCache,
     stage_options: FrameOptions | None = None,
 ) -> RasterizationOutput:
+    """One autograd entry for training and inference, preserving the caller mode."""
     values = dict(inputs, means2D=means2D)
     color, radii, final_t, contributors = Rasterize.apply(
         *(values.get(name) for name in INPUT_NAMES),
@@ -173,5 +202,6 @@ def rasterize_with_grad(
         renderer,
         launch_cache,
         stage_options,
+        torch.is_grad_enabled(),
     )
     return dict(color=color, radii=radii, final_T=final_t, contributors=contributors)
