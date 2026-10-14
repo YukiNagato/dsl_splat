@@ -494,6 +494,10 @@ def _make_evaluation(
                 if depth == INF:
                     id = -1
                 store(tail_queue(depths, ids, other_group), 32 + group.lane, depth, id)
+            # Each incoming run was written by all 32 lanes. Its 16-lane sort
+            # reads entries written by the other half, so publish the full run
+            # before either half starts sorting; a half-mask barrier cannot.
+            sync(FULL)
             sort_batch(tail, group)
             # Both half warps produced runs subsequently read by the full warp.
             # A shuffle exchanges registers; it does not fence shared memory.
