@@ -179,6 +179,8 @@ def merge(
         new_pos = 0
     new_pos += rank
     old_depth = depth_at(q, old_offset + rank)
+    # Finish every lane's search before replacing the run it reads.
+    sync(mask)
     q.depths[q.base + old_offset + rank] = depth
     sync(mask)
     old_pos = int(0)
@@ -329,6 +331,9 @@ def _make_stream_functions(
                 p = front_mid(p, group, mid, False, transforms, opacity, colors)
             else:
                 store(mid, 4 + group.mid_rank, depth, id)
+            # All lanes must finish reading this incoming run before the next
+            # batch scatters into the same four slots.
+            sync(group.head_mask)
             if check_valid:
                 p.tail_count -= wp.min(4, p.tail_count)
         if not check_valid:
@@ -490,6 +495,9 @@ def _make_evaluation(
                     id = -1
                 store(tail_queue(depths, ids, other_group), 32 + group.lane, depth, id)
             sort_batch(tail, group)
+            # Both half warps produced runs subsequently read by the full warp.
+            # A shuffle exchanges registers; it does not fence shared memory.
+            sync(FULL)
             for half in range(2):
                 q = tail_queue(depths, ids, (group.tail & ~1) + half)
                 old_count = shuffle_int(FULL, p.tail_count, half * 16, 32)
@@ -501,6 +509,8 @@ def _make_evaluation(
                     merge(q, 32, FULL, group.lane, 0, key, id)
                 else:
                     store(q, group.lane, key, id)
+            # A full warp wrote each tail; its owning half warp consumes it.
+            sync(FULL)
             for half in range(2):
                 if p.tail_count > 32:
                     # Drain sixteen to mid/head, retaining at most 32 in tail.
@@ -517,6 +527,9 @@ def _make_evaluation(
                             id_at(tail, dest + 16),
                         )
                     sync(group.half_mask)
+            # One half warp may drain longer than the other. Neither may
+            # overwrite the next incoming run until both finished shifting.
+            sync(FULL)
         if any_active(FULL, p.active):
             # End of tile stream: drain tail -> mid -> pixel heads. The valid
             # checks handle padded -1 entries in the final incoming batch.
@@ -532,6 +545,7 @@ def _make_evaluation(
                             depth_at(tail, group.half_lane + 16),
                             id_at(tail, group.half_lane + 16),
                         )
+                        sync(group.half_mask)
             if any_active(FULL, p.active):
                 if p.mid_count != 0:
                     store(
@@ -540,6 +554,7 @@ def _make_evaluation(
                         depth_at(mid, 4 + group.mid_rank),
                         id_at(mid, 4 + group.mid_rank),
                     )
+                    sync(group.head_mask)
                     p = front_mid(p, group, mid, True, transforms, opacity, colors)
                 while p.active and p.head_count != 0:
                     p = blend_step(p, colors)

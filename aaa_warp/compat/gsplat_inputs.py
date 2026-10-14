@@ -209,11 +209,9 @@ def normalize_inputs(
             raise ValueError("filter3D must have shape (...,N) or (...,N,1)")
         filters = filter3D.reshape(batch_count, n)
     if torch.is_grad_enabled() and any(
-        t is not None and t.requires_grad for t in (viewmats, Ks, backgrounds)
+        t is not None and t.requires_grad for t in (Ks, backgrounds)
     ):
-        raise NotImplementedError(
-            "camera/intrinsics/background gradients are not supported"
-        )
+        raise NotImplementedError("intrinsics/background gradients are not supported")
     return Inputs(
         batch_dims,
         batch_count,
@@ -224,7 +222,7 @@ def normalize_inputs(
         F.normalize(quats.reshape(batch_count, n, 4), dim=-1),
         scales.reshape(batch_count, n, 3),
         opacities.reshape(batch_count, n),
-        viewmats.detach().reshape(batch_count, cameras, 4, 4),
+        viewmats.reshape(batch_count, cameras, 4, 4),
         Ks.detach().reshape(batch_count, cameras, 3, 3),
         color_bank,
         background_bank,
@@ -233,6 +231,6 @@ def normalize_inputs(
         torch.is_grad_enabled()
         and any(
             isinstance(value, Tensor) and value.requires_grad
-            for value in (means, quats, scales, opacities, colors, extras)
+            for value in (means, quats, scales, opacities, colors, extras, viewmats)
         ),
     )

@@ -25,8 +25,9 @@ class GaussianRasterizer(torch.nn.Module):
     Python forward; a nonempty, fully culled scene returns the background.
 
     First-order backward follows the reference CUDA's 3D HIER conventions for
-    means, scale, rotation, opacity and features/SH. Camera/background gradients
-    are not supported; filter3D is constant, matching the reference API.
+    means, scale, rotation, opacity and features/SH. First-order camera gradients
+    support viewmatrix, projmatrix and campos, including adaptive filtering.
+    Background/inverse projection gradients are unsupported; filter3D is constant.
     """
 
     def __init__(

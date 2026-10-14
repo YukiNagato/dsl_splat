@@ -6,6 +6,7 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from .backward_preprocess import backward_preprocess
+from .backward_camera import backward_camera
 from .backward_render import backward_render
 from .binning import bin_and_sort
 from .dispatch import FrameBindings, LaunchCache
@@ -26,6 +27,7 @@ INPUT_NAMES = (
     "cov3D_precomp",
 )
 CAMERA_NAMES = ("bg", "viewmatrix", "projmatrix", "inv_viewprojmatrix", "campos")
+DIFFERENTIABLE_CAMERAS = ("viewmatrix", "projmatrix", "campos")
 
 
 class Rasterize(torch.autograd.Function):
@@ -41,6 +43,9 @@ class Rasterize(torch.autograd.Function):
         scales: torch.Tensor | None,
         rotations: torch.Tensor | None,
         cov3D_precomp: torch.Tensor | None,
+        viewmatrix: torch.Tensor,
+        projmatrix: torch.Tensor,
+        campos: torch.Tensor,
         config: GaussianRasterizationSettings,
         renderer: Renderer,
         launch_cache: LaunchCache,
@@ -62,13 +67,16 @@ class Rasterize(torch.autograd.Function):
         # Function.forward always runs without grad recording. needs_input_grad
         # describes its input tensors even under an outer no_grad/inference_mode,
         # so combine it with the caller's mode before preparing backward state.
-        needs_backward = grad_enabled and any(ctx.needs_input_grad[: len(INPUT_NAMES)])
+        differentiable_count = len(INPUT_NAMES) + len(DIFFERENTIABLE_CAMERAS)
+        needs_backward = grad_enabled and any(
+            ctx.needs_input_grad[:differentiable_count]
+        )
         if grad_enabled and any(
             isinstance(value, torch.Tensor) and value.requires_grad
-            for value in (getattr(config, name) for name in CAMERA_NAMES)
+            for value in (config.bg, config.inv_viewprojmatrix)
         ):
             raise ValueError(
-                "camera/background backward is not implemented; use torch.no_grad() for inference"
+                "background/inverse projection backward is not implemented; use torch.no_grad() for inference"
             )
         if needs_backward and renderer not in (
             render_hierarchical_3d,
@@ -118,6 +126,14 @@ class Rasterize(torch.autograd.Function):
         ctx.save_for_backward(*(value for _, _, value in named))
         ctx.config = config._replace(settings=copy_settings(config.settings))
         ctx.launch_cache = launch_cache
+        ctx.gaussian_grad = any(
+            ctx.needs_input_grad[index]
+            for index, name in enumerate(INPUT_NAMES)
+            if name not in ("means2D", "filter3D", "cov3D_precomp")
+        )
+        ctx.camera_grad = any(
+            ctx.needs_input_grad[len(INPUT_NAMES) : differentiable_count]
+        )
         ctx.screen_grad = stage_options is not None and stage_options.screen_grad
         ctx.absgrad_target = (
             None if stage_options is None else stage_options.absgrad_target
@@ -159,8 +175,19 @@ class Rasterize(torch.autograd.Function):
         )
         if ctx.absgrad_target is not None:
             ctx.absgrad_target.write(render_gradients["means2D_abs"])
-        gradients = backward_preprocess(
-            inputs, mappings["state"], render_gradients, config, _bindings=bindings
+        gradients = (
+            backward_preprocess(
+                inputs, mappings["state"], render_gradients, config, _bindings=bindings
+            )
+            if ctx.gaussian_grad
+            else {}
+        )
+        camera_gradients = (
+            backward_camera(
+                inputs, mappings["state"], render_gradients, config, _bindings=bindings
+            )
+            if ctx.camera_grad
+            else {}
         )
         result: list[torch.Tensor | None] = []
         for index, name in enumerate(INPUT_NAMES):
@@ -174,7 +201,9 @@ class Rasterize(torch.autograd.Function):
                 # Original AAA 3D calls retain their zero dummy gradient. The
                 # gsplat adapter explicitly opts into virtual screen translation.
                 gradient = (
-                    render_gradients["means2D"] if ctx.screen_grad else gradients[name]
+                    render_gradients["means2D"]
+                    if ctx.screen_grad
+                    else torch.zeros_like(inputs[name])
                 )
                 result.append(
                     gradient
@@ -183,6 +212,14 @@ class Rasterize(torch.autograd.Function):
                 )
             else:
                 result.append(gradients[name].reshape_as(inputs[name]))
+        result.extend(
+            (
+                camera_gradients[name]
+                if ctx.needs_input_grad[len(INPUT_NAMES) + index]
+                else None
+            )
+            for index, name in enumerate(DIFFERENTIABLE_CAMERAS)
+        )
         return (*result, None, None, None, None, None)
 
 
@@ -198,6 +235,7 @@ def rasterize(
     values = dict(inputs, means2D=means2D)
     color, radii, final_t, contributors = Rasterize.apply(
         *(values.get(name) for name in INPUT_NAMES),
+        *(getattr(config, name) for name in DIFFERENTIABLE_CAMERAS),
         config,
         renderer,
         launch_cache,

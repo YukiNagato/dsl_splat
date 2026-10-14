@@ -214,20 +214,23 @@ def rasterization(
 
     Supports arbitrary Gaussian batch dimensions, C pinhole cameras, shared or
     per-camera features/SH0–3, packed/dense metadata, radius culling,
-    RGB/arbitrary features, and first-order Gaussian/feature/alpha gradients.
+    RGB/arbitrary features, and first-order Gaussian/feature/alpha/pose gradients.
     Cameras are rendered sequentially on Torch's current CUDA stream.
 
     Inputs are activated scales/opacities and wxyz quaternions (normalized here).
     Output layouts are (...,C,H,W,D) and (...,C,H,W,1).
     Alpha is blended as a constant-one feature, so it remains differentiable.
     Only render_mode='RGB' is supported; depth modes raise NotImplementedError.
-    near_plane/far_plane build the projection matrix; Gaussian culling follows
-    AAA's 3D frustum-contribution test, with no additional center-Z clipping.
+    near_plane/far_plane use AAA's frontend projection, mapping them to depth 0/1.
+    Gaussian culling follows AAA's 3D frustum-contribution test, with no
+    additional center-Z clipping; its (-1,1) test admits depths down to ~near/2.
 
     Always uses AAA eval_3D; explicitly requesting with_eval3d=False is rejected.
     eps2d is fixed at 0.3; rasterize_mode controls AAA opacity compensation.
     channel_chunk is an accepted performance hint: all channels are fused.
-    Unsupported camera/background gradients, sparse gradients,
+    viewmats supports gradients through the AAA transform, adaptive filter,
+    opacity compensation and SH view direction. Intrinsic/background gradients,
+    sparse gradients,
     distortion/UT/rolling shutter, covariance inputs and distributed rendering
     raise explicit errors.
     Projected-mean gradients measure rigid pixel-space translation of the AAA

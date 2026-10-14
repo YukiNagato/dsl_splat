@@ -71,6 +71,8 @@ def prepare_cameras(
     projections[..., 1, 1] = 2 * intrinsics[..., 1, 1] / height
     projections[..., 0, 2] = 2 * intrinsics[..., 0, 2] / width - 1
     projections[..., 1, 2] = 2 * intrinsics[..., 1, 2] / height - 1
+    # Match AAA's frontend getProjectionMatrix: nominal near/far map to 0/1.
+    # Keep its combination with the backend's (-1,1) frustum test unchanged.
     projections[..., 2, 2] = (
         1 if math.isinf(far_plane) else far_plane / (far_plane - near_plane)
     )
@@ -81,7 +83,8 @@ def prepare_cameras(
     )
     projections[..., 3, 2] = 1
     full = (projections.to(device) @ views).transpose(-1, -2).contiguous()
-    inverse_full = torch.linalg.inv(full).contiguous()
+    # Used by discrete depth sorting/culling, which remains fixed in backward.
+    inverse_full = torch.linalg.inv(full.detach()).contiguous()
     values = [
         [(k[0][0], k[1][1], k[0][2], k[1][2]) for k in batch]
         for batch in intrinsics.tolist()
