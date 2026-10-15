@@ -12,7 +12,8 @@ from .binning import bin_and_sort
 from .dispatch import FrameBindings, LaunchCache
 from .frame import FrameOptions, prepare_frame
 from .render import render_hierarchical_3d, native_renderer, warp_renderer
-from .settings import GaussianRasterizationSettings, copy_settings
+from .config import FrameConfig
+from .settings import copy_settings
 from .types import GaussianInputs, Renderer, RasterizationOutput
 
 INPUT_NAMES = (
@@ -46,7 +47,7 @@ class Rasterize(torch.autograd.Function):
         viewmatrix: torch.Tensor,
         projmatrix: torch.Tensor,
         campos: torch.Tensor,
-        config: GaussianRasterizationSettings,
+        config: FrameConfig,
         renderer: Renderer,
         launch_cache: LaunchCache,
         stage_options: FrameOptions | None,
@@ -226,7 +227,7 @@ class Rasterize(torch.autograd.Function):
 def rasterize(
     inputs: GaussianInputs,
     means2D: torch.Tensor | None,
-    config: GaussianRasterizationSettings,
+    config: FrameConfig,
     renderer: Renderer,
     launch_cache: LaunchCache,
     stage_options: FrameOptions | None = None,

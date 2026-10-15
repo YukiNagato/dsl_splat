@@ -12,7 +12,7 @@ from .backward_preprocess import quaternion_rotation
 from .dispatch import FrameBindings, kernel_arg, launch
 from .geometry import load_camera
 from .interop import current_stream
-from .settings import GaussianRasterizationSettings
+from .config import FrameConfig
 from .types import GaussianInputs, PreprocessedGaussians, RenderGradients
 
 
@@ -227,7 +227,7 @@ def backward_camera(
     inputs: GaussianInputs,
     state: PreprocessedGaussians,
     render_gradients: RenderGradients,
-    config: GaussianRasterizationSettings,
+    config: FrameConfig,
     *,
     _bindings: FrameBindings | None = None,
 ) -> dict[str, torch.Tensor]:

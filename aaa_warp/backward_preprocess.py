@@ -8,7 +8,7 @@ operation. See BACKWARD_IMPLEMENTATION.md for their implications.
 """
 
 from .dispatch import FrameBindings, kernel_arg, launch
-from .settings import GaussianRasterizationSettings
+from .config import FrameConfig
 from .types import (
     GaussianInputs,
     PreprocessedGaussians,
@@ -271,7 +271,7 @@ def backward_preprocess(
     inputs: GaussianInputs,
     state: PreprocessedGaussians,
     render_gradients: RenderGradients,
-    raster_settings: GaussianRasterizationSettings,
+    raster_settings: FrameConfig,
     *,
     _bindings: FrameBindings | None = None,
 ) -> GaussianGradients:

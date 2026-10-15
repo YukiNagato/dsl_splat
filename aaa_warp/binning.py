@@ -6,7 +6,8 @@ in the low 32 bits, matching CUDA's ``constructSortKey``.
 
 from typing import Any
 from .dispatch import FrameBindings, kernel_arg, launch
-from .settings import ExtendedSettings, GaussianRasterizationSettings
+from .config import FrameConfig
+from .settings import ExtendedSettings
 from .types import PreprocessedGaussians, TileBins
 import torch
 import warp as wp
@@ -222,7 +223,7 @@ def _uses_aaa_default_duplicate(settings: ExtendedSettings) -> bool:
 
 def _duplicate_launch(
     preprocessed: PreprocessedGaussians,
-    raster_settings: GaussianRasterizationSettings,
+    raster_settings: FrameConfig,
     offsets: torch.Tensor,
     bindings: FrameBindings | None = None,
 ) -> tuple[wp.Kernel, list[Any], int]:
@@ -265,7 +266,7 @@ def _identify_ranges(keys: wp.array(dtype=wp.uint64), ranges: wp.array2d(dtype=i
 
 def _duplicate_inputs(
     preprocessed: PreprocessedGaussians,
-    raster_settings: GaussianRasterizationSettings,
+    raster_settings: FrameConfig,
     offsets: torch.Tensor,
     bindings: FrameBindings | None = None,
 ) -> list[Any]:
@@ -302,7 +303,7 @@ def _duplicate_inputs(
 @torch.no_grad()
 def bin_and_sort(
     preprocessed: PreprocessedGaussians,
-    raster_settings: GaussianRasterizationSettings,
+    raster_settings: FrameConfig,
     *,
     diagnostics: bool = True,
     _bindings: FrameBindings | None = None,

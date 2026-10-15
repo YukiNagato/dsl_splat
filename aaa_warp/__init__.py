@@ -5,6 +5,10 @@ from .binning import bin_and_sort
 from .render import render_hierarchical_3d
 from .rasterizer import GaussianRasterizer
 from .gsplat import rasterization
+from .functional import RasterizationResult, rasterize
+from .cameras import PinholeCamera
+from .config import default_settings
+from . import ops
 from .settings import (
     GaussianRasterizationSettings,
     ExtendedSettings,
@@ -21,6 +25,11 @@ __all__ = [
     "render_hierarchical_3d",
     "GaussianRasterizer",
     "rasterization",
+    "rasterize",
+    "RasterizationResult",
+    "PinholeCamera",
+    "default_settings",
+    "ops",
     "GaussianRasterizationSettings",
     "ExtendedSettings",
     "CullingSettings",

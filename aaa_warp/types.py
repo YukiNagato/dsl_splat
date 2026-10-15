@@ -11,7 +11,7 @@ from typing import Protocol, TypedDict
 from torch import Tensor
 
 from .dispatch import FrameBindings
-from .settings import GaussianRasterizationSettings
+from .config import FrameConfig
 
 
 class GaussianInputs(TypedDict, total=False):
@@ -97,7 +97,7 @@ class Renderer(Protocol):
         self,
         preprocessed: PreprocessedGaussians,
         bins: TileBins,
-        raster_settings: GaussianRasterizationSettings,
+        raster_settings: FrameConfig,
         *,
         output: RenderOutput | None = None,
         _bindings: FrameBindings | None = None,

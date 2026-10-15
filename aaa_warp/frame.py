@@ -9,7 +9,7 @@ from torch import Tensor
 
 from .dispatch import FrameBindings, LaunchCache
 from .preprocess import preprocess
-from .settings import GaussianRasterizationSettings
+from .config import FrameConfig
 from .types import GaussianInputs, PreprocessedGaussians
 
 
@@ -43,7 +43,7 @@ class FrameOptions:
 
 def prepare_frame(
     inputs: GaussianInputs,
-    config: GaussianRasterizationSettings,
+    config: FrameConfig,
     launch_cache: LaunchCache,
     options: FrameOptions | None = None,
 ) -> PreparedFrame:
@@ -54,7 +54,11 @@ def prepare_frame(
     state = preprocess(
         **{name: value for name, value in inputs.items() if name != "means2D"},
         raster_settings=config,
-        principal_point=None if options is None else options.principal_point,
+        principal_point=(
+            config.principal_point
+            if options is None or options.principal_point is None
+            else options.principal_point
+        ),
         _bindings=bindings,
     )
     if options is not None and options.radius_clip > 0:

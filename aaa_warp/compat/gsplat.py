@@ -4,42 +4,17 @@ import math
 from numbers import Integral
 from typing import Literal
 
-import torch
 from torch import Tensor
 
-from ..frame import FrameOptions, prepare_frame
-from ..rasterizer import GaussianRasterizer
-from ..settings import (
-    CullingSettings,
-    ExtendedSettings,
-    GlobalSortOrder,
-    SortMode,
-    SortSettings,
-)
-from ..types import GaussianInputs
-from .gsplat_cameras import Cameras, prepare_cameras
-from .gsplat_inputs import (
-    Inputs,
-    RenderMode,
-    normalize_inputs,
-    spherical_harmonics,
-)
-from .gsplat_metadata import ExtendedMetadata, ViewFrame, build_metadata
-
-_rasterizer = GaussianRasterizer()
+from ..config import default_settings
+from ..functional import rasterize
+from ..inputs import RenderMode
+from ..metadata import ExtendedMetadata
+from ..settings import ExtendedSettings
 
 
 def _default_settings(antialiased: bool) -> ExtendedSettings:
-    return ExtendedSettings(
-        sort_settings=SortSettings(
-            sort_mode=SortMode.HIER, sort_order=GlobalSortOrder.PTD_MAX
-        ),
-        culling_settings=CullingSettings(True, True, True, True),
-        load_balancing=True,
-        proper_ewa_scaling=antialiased,
-        eval_3D=True,
-        new_aabb=True,
-    )
+    return default_settings(antialiased=antialiased)
 
 
 def _validate_options(
@@ -110,63 +85,6 @@ def _validate_options(
         or sh_degree not in range(4)
     ):
         raise ValueError("sh_degree must be None or an integer in [0,3]")
-
-
-def _prepare_frames(
-    layout: Inputs,
-    cameras: Cameras,
-    sh_degree: int | None,
-    settings: ExtendedSettings,
-    radius_clip: float,
-) -> list[ViewFrame]:
-    frames: list[ViewFrame] = []
-    colors = layout.colors
-    ones = torch.ones(layout.n, 1, device=layout.device, dtype=torch.float32)
-    for batch in range(layout.batch_count):
-        for camera in range(layout.cameras):
-            means = layout.means[batch]
-            _, _, cx, cy = cameras.intrinsics[batch][camera]
-            value = colors.at(batch, camera)
-            if sh_degree is not None:
-                value = spherical_harmonics(
-                    value, means - cameras.centers[batch, camera], sh_degree
-                )
-            attributes: list[Tensor] = [value]
-            if layout.extras is not None:
-                attributes.append(layout.extras.at(batch, camera))
-            attributes.append(ones)
-            features = torch.cat(attributes, dim=-1)
-            background = torch.zeros(
-                features.shape[-1], device=layout.device, dtype=torch.float32
-            )
-            if layout.backgrounds is not None:
-                background[: colors.channels] = layout.backgrounds[batch, camera]
-            config = cameras.config(batch, camera, background, settings)
-            inputs: GaussianInputs = dict(
-                means3D=means,
-                rotations=layout.quats[batch],
-                scales=layout.scales[batch],
-                opacities=layout.opacities[batch],
-                colors_precomp=features,
-                filter3D=None if layout.filters is None else layout.filters[batch],
-            )
-            prepared = prepare_frame(
-                inputs,
-                config,
-                _rasterizer._launch_cache,
-                FrameOptions(principal_point=(cx, cy), radius_clip=radius_clip),
-            )
-            frames.append(
-                ViewFrame(
-                    batch,
-                    camera,
-                    config,
-                    inputs,
-                    prepared,
-                    cameras.intrinsics[batch][camera],
-                )
-            )
-    return frames
 
 
 def rasterization(
@@ -268,72 +186,33 @@ def rasterization(
             extra_signals_sh_degree=extra_signals_sh_degree,
         ),
     )
-    layout = normalize_inputs(
+    result = rasterize(
         means,
         quats,
         scales,
         opacities,
-        colors,
         viewmats,
         Ks,
-        backgrounds,
-        extra_signals,
-        filter3D,
-        sh_degree,
+        width,
+        height,
+        features=colors if sh_degree is None else None,
+        sh_coeffs=colors if sh_degree is not None else None,
+        sh_degree=sh_degree,
+        backgrounds=backgrounds,
+        extra_features=extra_signals,
+        filter3d=filter3D,
+        near_plane=near_plane,
+        far_plane=far_plane,
+        radius_clip=radius_clip,
+        packed=packed,
+        absgrad=absgrad,
+        settings=(
+            _default_settings(rasterize_mode == "antialiased")
+            if aaa_settings is None
+            else aaa_settings
+        ),
     )
-    cameras = prepare_cameras(layout, width, height, near_plane, far_plane)
-    if aaa_settings is not None and not isinstance(aaa_settings, ExtendedSettings):
-        raise ValueError("aaa_settings must use eval_3D=True and HIER sorting")
-    settings = (
-        _default_settings(rasterize_mode == "antialiased")
-        if aaa_settings is None
-        else aaa_settings.copy()
-    )
-    if (
-        not isinstance(settings, ExtendedSettings)
-        or not settings.eval_3D
-        or int(settings.sort_settings.sort_mode) != 3
-    ):
-        raise ValueError("aaa_settings must use eval_3D=True and HIER sorting")
-    frames = _prepare_frames(
-        layout,
-        cameras,
-        sh_degree,
-        settings,
-        radius_clip,
-    )
-    meta, screen, options = build_metadata(
-        frames, layout, width, height, packed=packed, absgrad=absgrad
-    )
-    channels = layout.colors.channels
-    extra_channels = 0 if layout.extras is None else layout.extras.channels
-    outputs: list[Tensor] = []
-    alphas: list[Tensor] = []
-    extras: list[Tensor] = []
-    for frame, option in zip(frames, options):
-        actual = _rasterizer(
-            **frame.inputs,
-            means2D=None if screen is None else screen[frame.batch, frame.camera],
-            raster_settings=frame.config,
-            return_aux=True,
-            _stage_options=option,
-        )
-        image = actual["color"].permute(1, 2, 0)
-        if layout.n == 0:
-            image = image + frame.config.bg
-        alpha = image[..., -1:]
-        outputs.append(image[..., :channels])
-        alphas.append(alpha)
-        if layout.extras is not None:
-            extras.append(image[..., channels:-1])
-    image_shape = layout.batch_dims + (layout.cameras, height, width)
-    render_colors = torch.stack(outputs).reshape(image_shape + (channels,))
-    render_alphas = torch.stack(alphas).reshape(image_shape + (1,))
-    if extras:
-        meta["render_extra_signals"] = torch.stack(extras).reshape(
-            image_shape + (extra_channels,)
-        )
-    return render_colors, render_alphas, meta
+    return result.features, result.alpha, result.meta
 
 
 __all__ = ["rasterization"]

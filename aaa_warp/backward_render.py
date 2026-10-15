@@ -5,7 +5,7 @@ the saved final image/transmittance and the same blending sequence.
 """
 
 from .dispatch import FrameBindings, kernel_arg, launch
-from .settings import GaussianRasterizationSettings
+from .config import FrameConfig
 from .types import PreprocessedGaussians, TileBins, RenderOutput, RenderGradients
 
 from functools import cache
@@ -141,7 +141,7 @@ def backward_render(
     bins: TileBins,
     output: RenderOutput,
     grad_color: torch.Tensor,
-    raster_settings: GaussianRasterizationSettings,
+    raster_settings: FrameConfig,
     *,
     screen_grad: bool = False,
     absgrad: bool = False,

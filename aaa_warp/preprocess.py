@@ -5,7 +5,7 @@ This is a forward-only diagnostic implementation, with no autograd registration.
 """
 
 from .dispatch import FrameBindings, kernel_arg, launch, launch_tiled
-from .settings import GaussianRasterizationSettings
+from .config import FrameConfig
 from .types import PreprocessedGaussians
 from typing import cast
 
@@ -166,7 +166,7 @@ def preprocess(
     *,
     means3D: torch.Tensor,
     opacities: torch.Tensor,
-    raster_settings: GaussianRasterizationSettings,
+    raster_settings: FrameConfig,
     scales: torch.Tensor | None = None,
     rotations: torch.Tensor | None = None,
     colors_precomp: torch.Tensor | None = None,

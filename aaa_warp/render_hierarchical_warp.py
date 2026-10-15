@@ -12,7 +12,7 @@ for RGB. StopThePop algorithm: MIT, Graz UT, 2024.
 """
 
 from .dispatch import FrameBindings, kernel_arg, launch
-from .settings import GaussianRasterizationSettings
+from .config import FrameConfig
 from .types import PreprocessedGaussians, TileBins, RenderOutput
 
 from functools import cache
@@ -622,7 +622,7 @@ def _make_kernel(cull_4x4: bool, channels: int = 3) -> wp.Kernel:
 def render_hierarchical_3d(
     preprocessed: PreprocessedGaussians,
     bins: TileBins,
-    raster_settings: GaussianRasterizationSettings,
+    raster_settings: FrameConfig,
     *,
     output: RenderOutput | None = None,
     _bindings: FrameBindings | None = None,

@@ -1,7 +1,7 @@
 """Public render-stage dispatch: native RGB baseline or specialized Warp features."""
 
 from .dispatch import FrameBindings
-from .settings import GaussianRasterizationSettings
+from .config import FrameConfig
 from .types import PreprocessedGaussians, TileBins, RenderOutput
 
 from .render_hierarchical_native import render_hierarchical_3d as native_renderer
@@ -11,7 +11,7 @@ from .render_hierarchical_warp import render_hierarchical_3d as warp_renderer
 def render_hierarchical_3d(
     preprocessed: PreprocessedGaussians,
     bins: TileBins,
-    raster_settings: GaussianRasterizationSettings,
+    raster_settings: FrameConfig,
     *,
     output: RenderOutput | None = None,
     _bindings: FrameBindings | None = None,

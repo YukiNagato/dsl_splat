@@ -2,8 +2,9 @@
 
 import torch
 
-from .dispatch import LaunchCache
+from .config import legacy_frame_config
 from .frame import FrameOptions
+from .pipeline import RenderContext
 from .settings import GaussianRasterizationSettings
 from .types import GaussianInputs, Renderer, RasterizationOutput
 from .render import render_hierarchical_3d, native_renderer
@@ -45,7 +46,7 @@ class GaussianRasterizer(torch.nn.Module):
         self.channels = channels
         self.raster_settings = raster_settings
         self._renderer = render_hierarchical_3d if renderer is None else renderer
-        self._launch_cache = LaunchCache()
+        self._context = RenderContext(self._renderer)
 
     def forward(
         self,
@@ -109,15 +110,11 @@ class GaussianRasterizer(torch.nn.Module):
             or int(config.settings.sort_settings.sort_mode) != 3
         ):
             raise ValueError("renderer currently supports eval_3D=True, sort_mode=HIER")
-        from .autograd import rasterize
-
-        output = rasterize(
+        output = self._context.render(
             inputs,
-            means2D,
-            config,
-            self._renderer,
-            self._launch_cache,
-            _stage_options,
+            legacy_frame_config(config),
+            means2d=means2D,
+            options=_stage_options,
         )
         if return_aux:
             return output
