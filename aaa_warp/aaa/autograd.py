@@ -9,7 +9,7 @@ from .backward_preprocess import backward_preprocess
 from .backward_camera import backward_camera
 from .backward_render import backward_render
 from .binning import bin_and_sort
-from .dispatch import FrameBindings, LaunchCache
+from ..runtime.dispatch import FrameBindings, LaunchCache
 from .frame import FrameOptions, prepare_frame
 from .render import render_hierarchical_3d, native_renderer, warp_renderer
 from .config import FrameConfig
@@ -90,7 +90,18 @@ class Rasterize(torch.autograd.Function):
         frame = prepare_frame(inputs, config, launch_cache, stage_options)
         state, bindings = frame.state, frame.bindings
         bins = bin_and_sort(state, config, diagnostics=False, _bindings=bindings)
-        output = renderer(state, bins, config, _bindings=bindings)
+        if stage_options is not None and stage_options.statistics is not None:
+            if renderer not in (render_hierarchical_3d, native_renderer, warp_renderer):
+                raise ValueError("contribution statistics require an AAA Warp renderer")
+            output = warp_renderer(
+                state,
+                bins,
+                config,
+                _bindings=bindings,
+                _statistics=stage_options.statistics,
+            )
+        else:
+            output = renderer(state, bins, config, _bindings=bindings)
         if means3D.shape[0] == 0:
             output["color"].zero_()
         result = (

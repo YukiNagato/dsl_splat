@@ -10,6 +10,7 @@ dist/
 # Local reference implementations and archived development experiments.
 /3dgs-warp-scratch/
 /AAA-Gaussians-Rasterization/
+/diff-gaussian-rasterization/
 /research/
 
 # Generated benchmark output; reproducible scripts live in tests/.
@@ -18,3 +19,4 @@ dist/
 # Downloaded models and rendered demonstration artifacts.
 /data/
 /outputs/
+/clip.tar

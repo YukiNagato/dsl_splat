@@ -1,4 +1,4 @@
-"""Reference GLM arithmetic for AAA's 3D preprocessing.
+"""Reference GLM arithmetic used by Gaussian projection kernels.
 
 Warp's generic matrix multiply uses a different FMA accumulation order, and its
 normalize divides each component instead of multiplying by a reciprocal length.

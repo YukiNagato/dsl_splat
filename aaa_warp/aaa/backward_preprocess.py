@@ -7,7 +7,7 @@ These are reference semantics, not automatic differentiation of every forward
 operation. See BACKWARD_IMPLEMENTATION.md for their implications.
 """
 
-from .dispatch import FrameBindings, kernel_arg, launch
+from ..runtime.dispatch import FrameBindings, kernel_arg, launch
 from .config import FrameConfig
 from .types import (
     GaussianInputs,
@@ -20,7 +20,7 @@ import torch
 import warp as wp
 
 from .geometry import load_camera
-from .interop import current_stream
+from ..runtime.interop import current_stream
 
 
 @wp.func

@@ -4,7 +4,7 @@ No per-pixel Gaussian history is stored. CUDA's front-to-back derivative uses
 the saved final image/transmittance and the same blending sequence.
 """
 
-from .dispatch import FrameBindings, kernel_arg, launch
+from ..runtime.dispatch import FrameBindings, kernel_arg, launch
 from .config import FrameConfig
 from .types import PreprocessedGaussians, TileBins, RenderOutput, RenderGradients
 
@@ -13,8 +13,9 @@ from functools import cache
 import torch
 import warp as wp
 
-from .backward_intrinsics import global_atomic_add
-from .interop import current_stream, contiguous_features
+from ..primitives.atomics import global_atomic_add
+from ..runtime.interop import current_stream, contiguous_features
+from ..statistics import DeviceStatistics
 from .render_adjoint import RenderAdjoint, _make_accumulate_ray_gradient
 from .render_hierarchical_warp import INF, _pixel_type, _make_evaluation
 
@@ -23,7 +24,7 @@ from .render_hierarchical_warp import INF, _pixel_type, _make_evaluation
 def _make_blend_backward(
     channels: int, screen_grad: bool = False, absgrad: bool = False
 ) -> wp.Function:
-    Pixel = _pixel_type(channels)
+    Pixel = _pixel_type(channels, False)
     feature_type = wp.types.vector(channels, wp.float32)
     accumulate_ray_gradient = _make_accumulate_ray_gradient(screen_grad, absgrad)
 
@@ -130,6 +131,7 @@ def _make_backward(
             final_t,
             contributors,
             adjoint,
+            DeviceStatistics(),
         )
 
     return replay

@@ -10,7 +10,7 @@ from functools import cache
 
 import warp as wp
 
-from .backward_intrinsics import global_atomic_add
+from ..primitives.atomics import global_atomic_add
 from .render_warp_geometry import dot3, reciprocal
 from .render_warp_intrinsics import load_matrix
 

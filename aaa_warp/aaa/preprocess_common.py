@@ -2,7 +2,7 @@
 
 import warp as wp
 from .geometry import rotation_matrix, frustum_minimum, tile_minimum_2d
-from .sh import evaluate_sh
+from ..primitives.sh import evaluate_sh
 
 
 @wp.kernel(enable_backward=False)

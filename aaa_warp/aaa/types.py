@@ -10,7 +10,8 @@ from typing import Protocol, TypedDict
 
 from torch import Tensor
 
-from .dispatch import FrameBindings
+from ..primitives.tiling import TileBins
+from ..runtime.dispatch import FrameBindings
 from .config import FrameConfig
 
 
@@ -47,18 +48,6 @@ class PreprocessedGaussians(_Geometry, total=False):
     cov3D: Tensor  # 2D: (N,6)
     conic_opacity: Tensor  # 2D: (N,4)
     cov3D_inv: Tensor
-
-
-class _TileRanges(TypedDict):
-    point_list: Tensor  # int32 (pairs,)
-    ranges: Tensor  # int32 (tiles,2)
-
-
-class TileBins(_TileRanges, total=False):
-    point_offsets: Tensor
-    point_list_keys_unsorted: Tensor
-    point_list_unsorted: Tensor
-    point_list_keys: Tensor
 
 
 class RenderOutput(TypedDict):

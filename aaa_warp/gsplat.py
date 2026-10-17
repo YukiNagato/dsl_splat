@@ -1,5 +1,5 @@
-"""Public gsplat-compatible entry point; implementation lives in compat/."""
+"""Backward-compatible AAA gsplat adapter."""
 
-from .compat.gsplat import rasterization
+from .aaa.gsplat import rasterization
 
 __all__ = ["rasterization"]

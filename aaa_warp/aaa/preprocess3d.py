@@ -1,8 +1,8 @@
 """AAA adaptive 3D filter and perspective-correct Gaussian bounds."""
 
 import warp as wp
-from .sh import evaluate_sh
-from .native_math import (
+from ..primitives.sh import evaluate_sh
+from ..primitives.math import (
     glm_matmul44,
     glm_filter_view_depth,
     glm_normalize3,

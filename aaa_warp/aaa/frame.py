@@ -7,7 +7,9 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from .dispatch import FrameBindings, LaunchCache
+from ..runtime.dispatch import FrameBindings, LaunchCache
+from ..runtime.gradients import AbsGradientTarget
+from ..statistics import PreparedStatistics
 from .preprocess import preprocess
 from .config import FrameConfig
 from .types import GaussianInputs, PreprocessedGaussians
@@ -20,25 +22,13 @@ class PreparedFrame:
 
 
 @dataclass(slots=True)
-class AbsGradientTarget:
-    """Publish a single view's statistics in its dense or packed destination."""
-
-    target: Tensor
-    gaussian_ids: Tensor | None = None
-
-    @torch.no_grad()
-    def write(self, gradient: Tensor) -> None:
-        value = gradient if self.gaussian_ids is None else gradient[self.gaussian_ids]
-        self.target.copy_(value)
-
-
-@dataclass(slots=True)
 class FrameOptions:
     principal_point: tuple[float, float] | None = None
     radius_clip: float = 0.0
     prepared: PreparedFrame | None = None
     screen_grad: bool = False
     absgrad_target: AbsGradientTarget | None = None
+    statistics: PreparedStatistics | None = None
 
 
 def prepare_frame(

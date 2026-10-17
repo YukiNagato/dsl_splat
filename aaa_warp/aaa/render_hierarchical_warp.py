@@ -11,7 +11,7 @@ render_hierarchical_native remains the unchanged RGB baseline and default
 for RGB. StopThePop algorithm: MIT, Graz UT, 2024.
 """
 
-from .dispatch import FrameBindings, kernel_arg, launch
+from ..runtime.dispatch import FrameBindings, kernel_arg, launch
 from .config import FrameConfig
 from .types import PreprocessedGaussians, TileBins, RenderOutput
 
@@ -21,7 +21,13 @@ from typing import cast
 import torch
 import warp as wp
 
-from .interop import current_stream, contiguous_features
+from ..runtime.interop import current_stream, contiguous_features
+from ..statistics import (
+    DeviceStatistics,
+    PreparedStatistics,
+    StatisticsKey,
+    make_observer,
+)
 from .render_adjoint import RenderAdjoint
 from .render_warp_geometry import sample, frustum
 from .render_warp_intrinsics import (
@@ -40,7 +46,7 @@ FULL = wp.constant(wp.uint32(0xFFFFFFFF))
 
 
 @cache
-def _pixel_type(channels: int) -> type:
+def _pixel_type(channels: int, with_statistics: bool) -> type:
     feature_type = wp.types.vector(channels, wp.float32)
 
     @wp.struct
@@ -64,6 +70,9 @@ def _pixel_type(channels: int) -> type:
         final_transmittance: float
         background_gradient: float
         adjoint: RenderAdjoint
+        if with_statistics:
+            statistics: DeviceStatistics
+            pixel_id: int
 
     return Pixel
 
@@ -128,9 +137,10 @@ def store(q: Queue, index: int, depth: float, id: int):
 
 
 @cache
-def _make_blend(channels: int) -> wp.Function:
-    Pixel = _pixel_type(channels)
+def _make_blend(channels: int, statistics_key: StatisticsKey = ()) -> wp.Function:
+    Pixel = _pixel_type(channels, bool(statistics_key))
     feature_type = wp.types.vector(channels, wp.float32)
+    observe = make_observer(statistics_key)
 
     @wp.func
     def blend_step(pixel: Pixel, colors: wp.array(dtype=feature_type)):
@@ -147,6 +157,10 @@ def _make_blend(channels: int) -> wp.Function:
                 for ch in range(wp.static(channels)):
                     c = wp.static(ch)
                     p.color[c] = p.color[c] + rgb[c] * alpha * p.transmittance
+                if wp.static(len(statistics_key) > 0):
+                    observe(
+                        p.statistics, p.head_ids[0], p.pixel_id, alpha * p.transmittance
+                    )
                 p.transmittance = next_t
                 for index in range(1, 4):
                     j = wp.static(index)
@@ -201,8 +215,8 @@ def merge(
 
 
 @cache
-def _make_insert_head(channels: int) -> wp.Function:
-    Pixel = _pixel_type(channels)
+def _make_insert_head(channels: int, with_statistics: bool = False) -> wp.Function:
+    Pixel = _pixel_type(channels, with_statistics)
 
     @wp.func
     def insert_head(pixel: Pixel, depth: float, alpha: float, id: int, gaussian: float):
@@ -239,11 +253,11 @@ def rank_mid(group: Group, depth: float):
 
 
 def _make_stream_functions(
-    blend_step: wp.Function, channels: int
+    blend_step: wp.Function, channels: int, with_statistics: bool = False
 ) -> tuple[wp.Function, wp.Function]:
-    Pixel = _pixel_type(channels)
+    Pixel = _pixel_type(channels, with_statistics)
     feature_type = wp.types.vector(channels, wp.float32)
-    insert_head = _make_insert_head(channels)
+    insert_head = _make_insert_head(channels, with_statistics)
 
     @wp.func
     def front_mid(
@@ -381,12 +395,15 @@ def _make_evaluation(
     blend_step: wp.Function | None = None,
     backward: bool = False,
     channels: int = 3,
+    statistics_key: StatisticsKey = (),
 ) -> wp.Function:
-    Pixel = _pixel_type(channels)
+    Pixel = _pixel_type(channels, bool(statistics_key))
     feature_type = wp.types.vector(channels, wp.float32)
     if blend_step is None:
-        blend_step = _make_blend(channels)
-    front_mid, push_mid = _make_stream_functions(blend_step, channels)
+        blend_step = _make_blend(channels, statistics_key)
+    front_mid, push_mid = _make_stream_functions(
+        blend_step, channels, bool(statistics_key)
+    )
 
     # Keep streaming loops rolled. Unroll only the fixed vector accesses in
     # the helpers with wp.static: broad unrolling inflates register pressure.
@@ -405,6 +422,7 @@ def _make_evaluation(
         final_t: wp.array(dtype=float),
         contributors: wp.array(dtype=int),
         adjoint: RenderAdjoint,
+        statistics: DeviceStatistics,
     ):
         cull = wp.static(cull_4x4)
         replay_backward = wp.static(backward)
@@ -429,6 +447,9 @@ def _make_evaluation(
         p.transmittance = 1.0
         p.head_depths = wp.vec4(INF)
         p.head_ids = wp.vec4i(-1)
+        if wp.static(len(statistics_key) > 0):
+            p.statistics = statistics
+            p.pixel_id = group.y * width + group.x
         if replay_backward:
             p.x = float(group.x)
             p.y = float(group.y)
@@ -576,9 +597,60 @@ def _make_evaluation(
 
 
 @cache
-def _make_kernel(cull_4x4: bool, channels: int = 3) -> wp.Kernel:
+def _make_kernel(
+    cull_4x4: bool, channels: int = 3, statistics_key: StatisticsKey = ()
+) -> wp.Kernel:
     feature_type = wp.types.vector(channels, wp.float32)
-    evaluate = _make_evaluation(cull_4x4, channels=channels)
+    evaluate = _make_evaluation(
+        cull_4x4, channels=channels, statistics_key=statistics_key
+    )
+
+    if statistics_key:
+
+        @wp.kernel(
+            module="unique",
+            enable_backward=False,
+            launch_bounds=256,
+            module_options={"max_unroll": 0},
+        )
+        def render_statistics(
+            width: int,
+            height: int,
+            ranges: wp.array(dtype=int),
+            point_list: wp.array(dtype=int),
+            transforms: wp.array(dtype=wp.mat44),
+            opacity: wp.array(dtype=float),
+            colors: wp.array(dtype=feature_type),
+            bg: wp.array(dtype=float),
+            output: wp.array(dtype=float),
+            final_t: wp.array(dtype=float),
+            contributors: wp.array(dtype=int),
+            pixel_values: wp.array2d(dtype=float),
+            counts: wp.array2d(dtype=int),
+            sums: wp.array2d(dtype=float),
+        ):
+            statistics = DeviceStatistics()
+            statistics.pixel_values = pixel_values
+            statistics.counts = counts
+            statistics.sums = sums
+            evaluate(
+                wp.tid(),
+                width,
+                height,
+                ranges,
+                point_list,
+                transforms,
+                opacity,
+                colors,
+                bg,
+                output,
+                final_t,
+                contributors,
+                RenderAdjoint(),
+                statistics,
+            )
+
+        return render_statistics
 
     @wp.kernel(
         module="unique",
@@ -613,6 +685,7 @@ def _make_kernel(cull_4x4: bool, channels: int = 3) -> wp.Kernel:
             final_t,
             contributors,
             RenderAdjoint(),
+            DeviceStatistics(),
         )
 
     return render
@@ -626,6 +699,7 @@ def render_hierarchical_3d(
     *,
     output: RenderOutput | None = None,
     _bindings: FrameBindings | None = None,
+    _statistics: PreparedStatistics | None = None,
 ) -> RenderOutput:
     """Blend (N,C) features in one traversal using a cached C specialization.
 
@@ -685,28 +759,41 @@ def render_hierarchical_3d(
     if transforms.data_ptr() % 16:
         transforms = transforms.clone()
     kernel = _make_kernel(
-        bool(settings.culling_settings.hierarchical_4x4_culling), channels
+        bool(settings.culling_settings.hierarchical_4x4_culling),
+        channels,
+        () if _statistics is None else _statistics.key,
     )
+    inputs = [
+        width,
+        height,
+        kernel_arg(bins["ranges"].contiguous().view(-1), wp.int32, _bindings),
+        kernel_arg(bins["point_list"].contiguous(), wp.int32, _bindings),
+        kernel_arg(transforms, wp.mat44, _bindings),
+        kernel_arg(preprocessed["opacity"].contiguous(), wp.float32, _bindings),
+        kernel_arg(contiguous_features(preprocessed["rgb"]), feature_type, _bindings),
+        kernel_arg(raster_settings.bg.contiguous().view(-1), wp.float32, _bindings),
+    ]
+    outputs = [
+        kernel_arg(output["color"].view(-1), wp.float32, _bindings),
+        kernel_arg(output["final_T"].view(-1), wp.float32, _bindings),
+        kernel_arg(output["contributors"].view(-1), wp.int32, _bindings),
+    ]
+    if _statistics is not None:
+        inputs.extend(outputs)
+        inputs.extend(
+            kernel_arg(value, bindings=_bindings)
+            for value in (
+                _statistics.pixel_values,
+                _statistics.counts,
+                _statistics.sums,
+            )
+        )
+        outputs = []
     launch(
         kernel,
         dim=256 * ((width + 15) // 16) * ((height + 15) // 16),
-        inputs=[
-            width,
-            height,
-            kernel_arg(bins["ranges"].contiguous().view(-1), wp.int32, _bindings),
-            kernel_arg(bins["point_list"].contiguous(), wp.int32, _bindings),
-            kernel_arg(transforms, wp.mat44, _bindings),
-            kernel_arg(preprocessed["opacity"].contiguous(), wp.float32, _bindings),
-            kernel_arg(
-                contiguous_features(preprocessed["rgb"]), feature_type, _bindings
-            ),
-            kernel_arg(raster_settings.bg.contiguous().view(-1), wp.float32, _bindings),
-        ],
-        outputs=[
-            kernel_arg(output["color"].view(-1), wp.float32, _bindings),
-            kernel_arg(output["final_T"].view(-1), wp.float32, _bindings),
-            kernel_arg(output["contributors"].view(-1), wp.int32, _bindings),
-        ],
+        inputs=inputs,
+        outputs=outputs,
         block_dim=256,
         stream=current_stream(device, bindings=_bindings),
         bindings=_bindings,

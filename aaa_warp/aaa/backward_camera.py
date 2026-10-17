@@ -9,9 +9,9 @@ import torch
 import warp as wp
 
 from .backward_preprocess import quaternion_rotation
-from .dispatch import FrameBindings, kernel_arg, launch
+from ..runtime.dispatch import FrameBindings, kernel_arg, launch
 from .geometry import load_camera
-from .interop import current_stream
+from ..runtime.interop import current_stream
 from .config import FrameConfig
 from .types import GaussianInputs, PreprocessedGaussians, RenderGradients
 

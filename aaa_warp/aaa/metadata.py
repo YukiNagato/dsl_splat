@@ -9,7 +9,9 @@ from torch import Tensor
 from .frame import AbsGradientTarget, FrameOptions, PreparedFrame
 from .config import FrameConfig
 from .types import GaussianInputs
-from .inputs import Inputs
+from ..inputs import Inputs
+from ..training import prepare_training_metadata
+from ..runtime.precision import camera_matmul
 
 
 class Metadata(TypedDict):
@@ -36,6 +38,7 @@ class Metadata(TypedDict):
 
 class ExtendedMetadata(Metadata, total=False):
     render_extra_signals: Tensor
+    statistics: dict[str, Tensor]
 
 
 @dataclass(slots=True)
@@ -61,7 +64,7 @@ def _geometry(frames: list[ViewFrame], layout: Inputs) -> dict[str, Tensor]:
             layout.viewmats[frame.batch, frame.camera],
             layout.means[frame.batch],
         )
-        points = means @ view[:3, :3].T + view[:3, 3]
+        points = camera_matmul(means, view[:3, :3].T) + view[:3, 3]
         fx, fy, cx, cy = frame.intrinsics
         z = points[:, 2]
         valid = state["radii"] > 0
@@ -97,20 +100,8 @@ def build_metadata(
 ) -> tuple[ExtendedMetadata, Tensor | None, list[FrameOptions]]:
     """Build auxiliary inputs before rendering; no scatter graph in inference."""
     dense = _geometry(frames, layout)
-    if packed:
-        batch_ids, camera_ids, gaussian_ids = (
-            (dense["radii"] > 0).all(-1).nonzero(as_tuple=True)
-        )
-        geometry = {
-            name: value[batch_ids, camera_ids, gaussian_ids]
-            for name, value in dense.items()
-        }
-    else:
-        batch_ids = camera_ids = gaussian_ids = None
-        geometry = {
-            name: value.reshape(layout.batch_dims + tuple(value.shape[1:]))
-            for name, value in dense.items()
-        }
+    training = prepare_training_metadata(dense, layout, packed=packed, absgrad=absgrad)
+    geometry = training.values
     meta: ExtendedMetadata = dict(
         width=width,
         height=height,
@@ -124,55 +115,20 @@ def build_metadata(
         conics=None,
         supports_means2d_grad=True,
         screen_gradient_mode="rigid_footprint_translation",
-        batch_ids=batch_ids,
-        camera_ids=camera_ids,
-        gaussian_ids=gaussian_ids,
+        batch_ids=geometry["batch_ids"],
+        camera_ids=geometry["camera_ids"],
+        gaussian_ids=geometry["gaussian_ids"],
         radii=geometry["radii"],
         means2d=geometry["means2d"],
         opacities=geometry["opacities"],
         tiles_per_gauss=geometry["tiles_per_gauss"],
     )
-    # Model derivatives are already returned by the AAA analytic backward.
-    # This independent auxiliary input exposes statistics without double counting.
-    screen = meta["means2d"].detach().requires_grad_(layout.requires_screen_grad)
-    meta["means2d"] = screen
     options = [
-        FrameOptions(prepared=frame.prepared, screen_grad=layout.requires_screen_grad)
-        for frame in frames
-    ]
-    if not layout.requires_screen_grad:
-        return meta, None, options
-    if packed:
-        dense_screen = torch.zeros_like(dense["means2d"]).index_put(
-            (batch_ids, camera_ids, gaussian_ids),
-            screen,
+        FrameOptions(
+            prepared=frame.prepared,
+            screen_grad=layout.requires_screen_grad,
+            absgrad_target=target,
         )
-    else:
-        dense_screen = screen.reshape(layout.batch_count, layout.cameras, layout.n, 2)
-    if absgrad:
-        absolute = torch.zeros_like(screen)
-        setattr(screen, "absgrad", absolute)
-        if packed:
-            # nonzero returns row-major order, so every frame owns one contiguous
-            # packed slice. One count read replaces a per-camera nonzero + scatter.
-            counts = (
-                [len(screen)]
-                if len(frames) == 1
-                else (dense["radii"] > 0).all(-1).sum(-1).flatten().tolist()
-            )
-            begin = 0
-            for option, count in zip(options, counts):
-                end = begin + count
-                option.absgrad_target = AbsGradientTarget(
-                    absolute[begin:end], gaussian_ids=gaussian_ids[begin:end]
-                )
-                begin = end
-        else:
-            absolute_views = absolute.reshape(
-                layout.batch_count, layout.cameras, layout.n, 2
-            )
-            for frame, option in zip(frames, options):
-                option.absgrad_target = AbsGradientTarget(
-                    absolute_views[frame.batch, frame.camera]
-                )
-    return meta, dense_screen, options
+        for frame, target in zip(frames, training.absolute_targets)
+    ]
+    return meta, training.screen, options

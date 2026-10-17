@@ -4,7 +4,7 @@ from torch import Tensor
 
 from .autograd import rasterize
 from .config import FrameConfig
-from .dispatch import LaunchCache
+from ..runtime.dispatch import LaunchCache
 from .frame import FrameOptions, PreparedFrame, prepare_frame
 from .render import render_hierarchical_3d
 from .types import GaussianInputs, RasterizationOutput, Renderer

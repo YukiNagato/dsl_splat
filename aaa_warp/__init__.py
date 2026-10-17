@@ -1,4 +1,7 @@
-"""Incremental NVIDIA Warp port of AAA-Gaussians rasterization."""
+"""Warp Gaussian renderers; legacy top-level rendering exports select AAA.
+
+Use aaa_warp.aaa or aaa_warp.gs3d for method-local APIs and adapters.
+"""
 
 from .preprocess import preprocess
 from .binning import bin_and_sort

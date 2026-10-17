@@ -7,21 +7,28 @@ from typing import Literal
 import torch
 from torch import Tensor
 import torch.nn.functional as F
+from .primitives.spherical_harmonics import spherical_harmonics as _warp_sh
 
 RenderMode = Literal["RGB", "D", "ED", "RGB+D", "RGB+ED"]
 
 
+def batch_item(values: Tensor, index: int) -> Tensor:
+    """Use squeeze for singleton batches, avoiding a gradient scatter/copy."""
+    return values.squeeze(0) if index == 0 and values.shape[0] == 1 else values[index]
+
+
 @dataclass(slots=True)
 class ViewFeatures:
-    values: Tensor
+    values: tuple[Tensor, ...]
     per_view: bool
 
     @property
     def channels(self) -> int:
-        return self.values.shape[-1]
+        return self.values[0].shape[-1]
 
     def at(self, batch: int, camera: int) -> Tensor:
-        return self.values[batch, camera] if self.per_view else self.values[batch]
+        values = self.values[batch]
+        return batch_item(values, camera) if self.per_view else values
 
 
 @dataclass(slots=True)
@@ -31,10 +38,10 @@ class Inputs:
     n: int
     cameras: int
     device: torch.device
-    means: Tensor
-    quats: Tensor
-    scales: Tensor
-    opacities: Tensor
+    means: tuple[Tensor, ...]
+    quats: tuple[Tensor, ...]
+    scales: tuple[Tensor, ...]
+    opacities: tuple[Tensor, ...]
     viewmats: Tensor
     Ks: Tensor
     colors: ViewFeatures
@@ -47,7 +54,16 @@ class Inputs:
 def spherical_harmonics(
     coefficients: Tensor, directions: Tensor, degree: int
 ) -> Tensor:
-    """Degree 0–3 real SH, with Torch derivatives through coefficients/direction."""
+    """SH0–3 with fused CUDA float32 gradients and a CPU/double Torch path."""
+    if coefficients.is_cuda and coefficients.dtype == directions.dtype == torch.float32:
+        return _warp_sh(coefficients, directions, degree)
+    return _torch_spherical_harmonics(coefficients, directions, degree)
+
+
+def _torch_spherical_harmonics(
+    coefficients: Tensor, directions: Tensor, degree: int
+) -> Tensor:
+    """Torch reference, also used for CPU/double numerical differentiation."""
     direction = F.normalize(directions, dim=-1)
     x, y, z = direction.unbind(-1)
     basis = [torch.full_like(x, 0.28209479177387814)]
@@ -100,6 +116,17 @@ def check_tensor(
         )
 
 
+def _batch_views(
+    value: Tensor, batch_count: int, item_shape: tuple[int, ...]
+) -> tuple[Tensor, ...]:
+    """Keep unbatched inputs intact and share one unbind across real batches."""
+    if batch_count == 1:
+        return (value if value.shape == item_shape else value.reshape(item_shape),)
+    shape = (batch_count,) + item_shape
+    values = value if value.shape == shape else value.reshape(shape)
+    return values.unbind(0)
+
+
 def _view_values(
     name: str,
     value: Tensor,
@@ -130,8 +157,8 @@ def _view_values(
         )
     if sh and tail[-1] != 3:
         raise ValueError("SH colors must have three channels")
-    shape = (batch_count,) + ((cameras,) if per_view else ()) + tail
-    return ViewFeatures(value.reshape(shape), per_view)
+    item_shape = ((cameras,) if per_view else ()) + tail
+    return ViewFeatures(_batch_views(value, batch_count, item_shape), per_view)
 
 
 def normalize_inputs(
@@ -190,7 +217,7 @@ def normalize_inputs(
         device,
         sh=sh_degree is not None,
     )
-    if sh_degree is not None and color_bank.values.shape[-2] < (sh_degree + 1) ** 2:
+    if sh_degree is not None and color_bank.values[0].shape[-2] < (sh_degree + 1) ** 2:
         raise ValueError("not enough SH coefficients for sh_degree")
     d = color_bank.channels
     background_bank = None
@@ -218,10 +245,10 @@ def normalize_inputs(
         n,
         cameras,
         device,
-        means.reshape(batch_count, n, 3),
-        F.normalize(quats.reshape(batch_count, n, 4), dim=-1),
-        scales.reshape(batch_count, n, 3),
-        opacities.reshape(batch_count, n),
+        _batch_views(means, batch_count, (n, 3)),
+        _batch_views(F.normalize(quats, dim=-1), batch_count, (n, 4)),
+        _batch_views(scales, batch_count, (n, 3)),
+        _batch_views(opacities, batch_count, (n,)),
         viewmats.reshape(batch_count, cameras, 4, 4),
         Ks.detach().reshape(batch_count, cameras, 3, 3),
         color_bank,
