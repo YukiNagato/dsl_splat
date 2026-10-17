@@ -1,6 +1,6 @@
-"""Warp Gaussian renderers; legacy top-level rendering exports select AAA.
+"""DSL Splat: Warp Gaussian renderers; top-level rendering exports select AAA.
 
-Use aaa_warp.aaa or aaa_warp.gs3d for method-local APIs and adapters.
+Use dsl_splat.aaa or dsl_splat.gs3d for method-local APIs and adapters.
 """
 
 from .preprocess import preprocess

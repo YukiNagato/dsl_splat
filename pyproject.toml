@@ -3,19 +3,19 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "aaa-gaussians-warp"
+name = "dsl-splat"
 version = "0.1.0"
-description = "Differentiable Gaussian renderers with Python-managed NVIDIA Warp JIT"
-readme = "aaa_warp/README.md"
+description = "Differentiable Gaussian splatting algorithms with NVIDIA Warp"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["torch>=2.0", "warp-lang>=1.17"]
-license = {file = "aaa_warp/LICENSE.md"}
+license = {file = "dsl_splat/LICENSE.md"}
 
 [tool.setuptools.packages.find]
-include = ["aaa_warp*"]
+include = ["dsl_splat*"]
 
 [tool.setuptools.package-data]
-aaa_warp = ["py.typed", "*.md", "STOPTHEPOP_LICENSE.txt"]
+dsl_splat = ["py.typed", "*.md", "STOPTHEPOP_LICENSE.txt"]
 
 [tool.black]
 target-version = ["py310"]
@@ -28,13 +28,13 @@ python_version = "3.10"
 follow_imports = "skip"
 ignore_missing_imports = true
 files = [
-    "aaa_warp/aaa/types.py", "aaa_warp/aaa/frame.py", "aaa_warp/aaa/settings.py",
-    "aaa_warp/runtime", "aaa_warp/aaa/autograd.py", "aaa_warp/aaa/legacy.py",
-    "aaa_warp/aaa/render.py", "aaa_warp/aaa/gsplat.py", "aaa_warp/aaa/config.py",
-    "aaa_warp/aaa/cameras.py", "aaa_warp/aaa/metadata.py", "aaa_warp/aaa/pipeline.py",
-    "aaa_warp/aaa/api.py", "aaa_warp/aaa/ops.py", "aaa_warp/cameras.py",
-    "aaa_warp/inputs.py", "aaa_warp/training.py", "aaa_warp/statistics.py",
-    "aaa_warp/gs3d/api.py", "aaa_warp/gs3d/autograd.py", "aaa_warp/gs3d/cameras.py",
-    "aaa_warp/gs3d/frame.py", "aaa_warp/gs3d/gsplat.py", "aaa_warp/gs3d/ops.py",
-    "aaa_warp/primitives/spherical_harmonics.py",
+    "dsl_splat/aaa/types.py", "dsl_splat/aaa/frame.py", "dsl_splat/aaa/settings.py",
+    "dsl_splat/runtime", "dsl_splat/aaa/autograd.py", "dsl_splat/aaa/legacy.py",
+    "dsl_splat/aaa/render.py", "dsl_splat/aaa/gsplat.py", "dsl_splat/aaa/config.py",
+    "dsl_splat/aaa/cameras.py", "dsl_splat/aaa/metadata.py", "dsl_splat/aaa/pipeline.py",
+    "dsl_splat/aaa/api.py", "dsl_splat/aaa/ops.py", "dsl_splat/cameras.py",
+    "dsl_splat/inputs.py", "dsl_splat/training.py", "dsl_splat/statistics.py",
+    "dsl_splat/gs3d/api.py", "dsl_splat/gs3d/autograd.py", "dsl_splat/gs3d/cameras.py",
+    "dsl_splat/gs3d/frame.py", "dsl_splat/gs3d/gsplat.py", "dsl_splat/gs3d/ops.py",
+    "dsl_splat/primitives/spherical_harmonics.py",
 ]
