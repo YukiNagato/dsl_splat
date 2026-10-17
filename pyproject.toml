@@ -16,6 +16,7 @@ include = ["dsl_splat*"]
 
 [tool.setuptools.package-data]
 dsl_splat = ["py.typed", "*.md", "STOPTHEPOP_LICENSE.txt"]
+"dsl_splat.strategy" = ["LICENSE", "*.md"]
 
 [tool.black]
 target-version = ["py310"]
