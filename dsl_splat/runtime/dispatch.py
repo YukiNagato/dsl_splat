@@ -83,11 +83,13 @@ class FrameBindings:
 
 
 def kernel_arg(
-    tensor: torch.Tensor,
+    tensor: torch.Tensor | None,
     dtype: type | None = None,
     bindings: FrameBindings | None = None,
-) -> ctypes.Structure:
-    """Build a direct kernel descriptor; optional cache is scoped to one frame."""
+) -> ctypes.Structure | None:
+    """Bind a Tensor or a null array; the descriptor cache is phase-local."""
+    if tensor is None:
+        return None
     if bindings is not None:
         return bindings.array(tensor, dtype)
     return wp.from_torch(tensor, dtype=dtype, requires_grad=False, return_ctype=True)
@@ -167,7 +169,12 @@ class LaunchCache:
                 if dimensions != previous_dimensions:
                     command.set_dim(dim)
                     commands[key] = command, dimensions
-                command.set_params_from_ctypes(packed)
+                for index, value in enumerate(packed):
+                    if value is None:
+                        # Warp packs None as a null array through its typed API.
+                        command.set_param_at_index(index, None)
+                    else:
+                        command.set_param_at_index_from_ctype(index, value)
                 commands.move_to_end(key)
             return command.launch(stream=stream)
         finally:

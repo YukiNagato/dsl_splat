@@ -1,5 +1,6 @@
 import torch
 from dsl_splat.strategy.default import DefaultStrategy
+from dsl_splat.metrics import fused_ssim
 from dataclasses import dataclass
 from colmap_dataset import Dataset, ImageFrame
 from model import GaussianContainer
@@ -41,6 +42,7 @@ class Config:
     opacities_lr: float = 0.05
     features_dc_lr: float = 0.0025
     features_rest_lr: float = 0.0025 / 20
+    ssim_loss_factor: float = 0.2
 
 
 def render_with_rasterizer(
@@ -154,8 +156,9 @@ def main(cfg: Config):
         rgb = render[:, ..., :3]
         rgb = rgb.squeeze(0)
         gt = frame.image.to(device)
-        loss = torch.abs(gt - rgb).mean()
-
+        l1 = torch.abs(gt - rgb).mean()
+        ssim_loss = 1 - fused_ssim(rgb, gt)
+        loss = cfg.ssim_loss_factor * ssim_loss + (1 - cfg.ssim_loss_factor) * l1
         loss.backward()
         for optimizer in optimizers_dict.values():
             optimizer.step()

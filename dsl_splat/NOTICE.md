@@ -42,3 +42,10 @@ revisions, adapted files, and local changes are recorded in
 [pgsr/README.md](pgsr/README.md). The PGSR authors' terms are retained in
 [pgsr/PGSR_LICENSE.txt](pgsr/PGSR_LICENSE.txt); RaDe-GS's Gaussian-Splatting
 license is included in [LICENSE.md](LICENSE.md).
+
+## Fused SSIM
+
+The Warp SSIM metric adapts the filtering structure and coefficients from
+Rahul Goel's fused-ssim (MIT, 2024). Source revision and local changes are
+recorded in [metrics/README.md](metrics/README.md); the upstream terms are
+retained in [metrics/FUSED_SSIM_LICENSE.txt](metrics/FUSED_SSIM_LICENSE.txt).

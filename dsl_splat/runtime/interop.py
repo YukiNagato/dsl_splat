@@ -31,7 +31,7 @@ def current_stream(
         cached = bindings._streams.get(key)
         if cached is not None:
             return cached
-    active = wp.get_stream(wp.device_from_torch(device))
+    active = wp.get_stream(wp.device_from_torch(torch_stream.device))
     if active.cuda_stream == torch_stream.cuda_stream:
         stream = active
     else:

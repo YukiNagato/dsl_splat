@@ -31,6 +31,7 @@ from dsl_splat.pgsr import (
     single_view_loss,
 )
 from dsl_splat.pgsr.geometry import MIN_DEPTH
+from dsl_splat.metrics import fused_ssim
 
 if __package__:
     from .colmap_dataset import Dataset, ImageFrame
@@ -203,6 +204,7 @@ class Config:
     opacities_lr: float = 0.05
     features_dc_lr: float = 0.0025
     features_rest_lr: float = 0.0025 / 20
+    ssim_loss_factor: float = 0.2
 
     # PGSR parameters; the multi-view factor weights NCC and geometry separately.
     pgsr_compile: bool = True
@@ -361,7 +363,10 @@ def main(cfg: Config) -> None:
         render, alpha, info = render_frame(frame)
         strategy.step_pre_backward(gaussian.gauss_params, optimizers, state, step, info)
         rgb, gt = render[0, ..., :3], frame.image.to(device)
-        losses = {"main_loss": (gt - rgb).abs().mean()}
+        l1 = torch.abs(gt - rgb).mean()
+        ssim_loss = 1 - fused_ssim(rgb, gt)
+        main_loss = cfg.ssim_loss_factor * ssim_loss + (1 - cfg.ssim_loss_factor) * l1
+        losses = {"main_loss": main_loss}
         visible = (info["radii"][0] > 0).all(dim=-1)
         if visible.any():
             losses["flatten_loss"] = cfg.pgsr_flatten_loss_factor * flatten_loss(
