@@ -149,7 +149,7 @@ def main(cfg: Config):
             frame.image.shape[1],
             sh_degree_to_use
         )
-        info["means2d"].retain_grad()
+        strategy.step_pre_backward(gaussian.gauss_params, optimizers, state, step, info)
 
         rgb = render[:, ..., :3]
         rgb = rgb.squeeze(0)

@@ -44,3 +44,40 @@ python demo/train_3dgs.py --help
 Review the learning rates, densification/pruning thresholds and schedules in
 `Config`, as well as the `scene_scale` passed to `strategy.initialize_state()`
 in the training script. These settings may need adjustment for your scene.
+
+## PGSR-style training
+
+[train_pgsr.py](train_pgsr.py) adds plane flattening, single-view normal
+consistency, and multi-view geometry/NCC supervision. Its training outline
+follows PGSR; patch NCC follows RaDe-GS and runs through
+[warp_patch_ncc.py](warp_patch_ncc.py). It uses DSL Splat's existing 3DGS or AAA
+renderer and DefaultStrategy, rather than reproducing every PGSR training option.
+
+```bash
+python -m demo.train_pgsr --data-root /path/to/scene --im-stride 8
+```
+
+Images are RGB HWC, and camera poses are ordinary OpenCV world-to-camera
+matrices. Rendered plane attributes come from `info["render_extra_signals"]`.
+The renderer uses half-integer pixel centers; geometry and NCC use integer
+array indices with a matching principal-point adjustment inside this demo.
+
+View supervision starts after step 7000 by default. Neighbor distance limits
+use the reconstruction's world units; inspect the `pgsr_*` options and tune
+them for your scene. This script also primarily demonstrates usage: its
+training parameters are examples, not established optimal settings.
+
+NCC defaults to PGSR's one-pixel patch spacing
+(`pgsr_multi_view_half_step=False`). Enable `--pgsr-multi-view-half-step` to
+use RaDe-GS's half-pixel spacing instead.
+
+Set `--debug-save-path /path/to/debug` to save a PGSR debug grid every 200
+steps, including step 0. The top row contains ground truth, rendered RGB,
+rendered normals, and plane distance; the bottom row contains multi-view
+geometry weights, plane depth, depth normals, and image-gradient weights.
+Before multi-view supervision starts, or when no neighbor is available,
+the geometry weights are zero. Filenames include the step and frame name.
+
+Example debug output from the garden scene:
+
+![PGSR-style debug grid for the garden scene](assets/pgsr_garden_debug_example.jpg)
