@@ -17,6 +17,7 @@ include = ["dsl_splat*"]
 [tool.setuptools.package-data]
 dsl_splat = ["py.typed", "*.md", "STOPTHEPOP_LICENSE.txt"]
 "dsl_splat.strategy" = ["LICENSE", "*.md"]
+"dsl_splat.pgsr" = ["*.md", "*_LICENSE.txt"]
 
 [tool.black]
 target-version = ["py310"]
@@ -38,4 +39,5 @@ files = [
     "dsl_splat/gs3d/api.py", "dsl_splat/gs3d/autograd.py", "dsl_splat/gs3d/cameras.py",
     "dsl_splat/gs3d/frame.py", "dsl_splat/gs3d/gsplat.py", "dsl_splat/gs3d/ops.py",
     "dsl_splat/primitives/spherical_harmonics.py",
+    "dsl_splat/pgsr/geometry.py", "dsl_splat/pgsr/losses.py", "dsl_splat/pgsr/types.py",
 ]

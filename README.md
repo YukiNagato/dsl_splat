@@ -14,13 +14,14 @@ CUDA implementations, and have started using this code in my own projects.
 | --- | --- |
 | [Original 3DGS](dsl_splat/gs3d/) | Gaussian projection, tile-based depth sorting, alpha blending, and backward propagation. |
 | [AAA-Gaussians](dsl_splat/aaa/) | Adaptive 3D antialiasing, 3D Gaussian evaluation, StopThePop hierarchical sorting, and backward propagation. |
+| [PGSR](dsl_splat/pgsr/README.md) | Plane geometry, flattening and normal consistency losses, and multiview geometry/NCC supervision using the 3DGS or AAA renderer. |
 
-Both methods support RGB and SH0–3 rendering, alpha blending of arbitrary
+The 3DGS and AAA renderers support RGB and SH0–3 rendering, alpha blending of arbitrary
 feature channels, first-order Gaussian/feature/camera-pose gradients, and
 screen-space gradient metadata for densification, including absolute gradients.
 They accept OpenCV-style world-to-camera `viewmats` and pinhole intrinsics `Ks`.
 
-Each method has its own rendering API and low-level operations:
+Each renderer has its own rendering API and low-level operations:
 
 ```python
 from dsl_splat import aaa, gs3d
@@ -32,7 +33,7 @@ result = aaa.rasterize(...)
 ## gsplat-style interfaces
 
 I frequently use splatting in my work and want to reuse code written around
-gsplat's calling convention. Each method therefore provides a separate
+gsplat's calling convention. Each renderer therefore provides a separate
 gsplat-style `rasterization` adapter:
 
 ```python

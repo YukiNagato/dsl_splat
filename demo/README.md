@@ -49,8 +49,9 @@ in the training script. These settings may need adjustment for your scene.
 
 [train_pgsr.py](train_pgsr.py) adds plane flattening, single-view normal
 consistency, and multi-view geometry/NCC supervision. Its training outline
-follows PGSR; patch NCC follows RaDe-GS and runs through
-[warp_patch_ncc.py](warp_patch_ncc.py). It uses DSL Splat's existing 3DGS or AAA
+follows PGSR; plane geometry and losses live in
+[`dsl_splat.pgsr`](../dsl_splat/pgsr/README.md), including the RaDe-GS-style
+[Warp patch NCC](../dsl_splat/pgsr/patch_ncc.py). It uses DSL Splat's existing 3DGS or AAA
 renderer and DefaultStrategy, rather than reproducing every PGSR training option.
 
 ```bash
@@ -70,6 +71,11 @@ training parameters are examples, not established optimal settings.
 NCC defaults to PGSR's one-pixel patch spacing
 (`pgsr_multi_view_half_step=False`). Enable `--pgsr-multi-view-half-step` to
 use RaDe-GS's half-pixel spacing instead.
+
+The demo enables `torch.compile` for Gaussian plane attributes, depth/normal
+recovery, and dense multiview reprojection. Initial calls include compilation
+time. Use `--no-pgsr-compile` to run those blocks in eager mode. Image weights,
+dynamic patch selection, Warp rendering/NCC, and debug I/O stay outside compilation.
 
 Set `--debug-save-path /path/to/debug` to save a PGSR debug grid every 200
 steps, including step 0. The top row contains ground truth, rendered RGB,

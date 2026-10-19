@@ -34,3 +34,11 @@ The component's full license is included in [strategy/LICENSE](strategy/LICENSE)
 [strategy/README.md](strategy/README.md) records the source files and local
 adaptations. This component-specific license does not replace the renderer
 license described above or relicense the rest of this package.
+
+## PGSR plane supervision and RaDe-GS NCC
+
+The `pgsr/` geometry and loss helpers adapt PGSR and RaDe-GS. Their source
+revisions, adapted files, and local changes are recorded in
+[pgsr/README.md](pgsr/README.md). The PGSR authors' terms are retained in
+[pgsr/PGSR_LICENSE.txt](pgsr/PGSR_LICENSE.txt); RaDe-GS's Gaussian-Splatting
+license is included in [LICENSE.md](LICENSE.md).

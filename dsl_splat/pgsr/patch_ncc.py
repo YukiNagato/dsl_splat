@@ -1,9 +1,10 @@
-"""Warp port of RaDe-GS's plane-warped patch NCC, for learning and comparison.
+"""Warp port of RaDe-GS's plane-warped patch NCC.
 
 One thread handles one patch and computes NCC plus its depth/normal derivatives
 in the same traversal, as in the CUDA reference. Images are grayscale float32.
 ``R`` follows the reference's column-storage convention: pass ``rotation.T``
 for the mathematical rotation from the reference camera to the neighbor.
+Upstream source, license, and local adaptations are recorded in README.md.
 """
 
 from functools import lru_cache
