@@ -1,3 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# Derived from gsplat v1.4.0, gsplat/strategy/default.py (gsplat contributors).
+# Modified for DSL Splat: optional max_gs_num growth budget and random sampling.
+# See README.md and LICENSE in this directory for source and license details.
+
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple, Union
 
@@ -58,6 +63,11 @@ class DefaultStrategy(Strategy):
         key_for_gradient (str): Which variable uses for densification strategy.
           3DGS uses "means2d" gradient and 2DGS uses a similar gradient which stores
           in variable "gradient_2dgs".
+        max_gs_num (int, optional): Maximum GS count after growth. If there is
+          insufficient room, uniformly sample from the combined duplicate/split
+          candidates. Both operations add one net GS per selected candidate.
+          Existing GSs are not removed if already above the limit; growth pauses
+          until pruning frees room. Default is None (unlimited).
 
     Examples:
 
@@ -92,6 +102,13 @@ class DefaultStrategy(Strategy):
     revised_opacity: bool = False
     verbose: bool = False
     key_for_gradient: Literal["means2d", "gradient_2dgs"] = "means2d"
+    max_gs_num: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_gs_num is not None and (
+            not isinstance(self.max_gs_num, int) or self.max_gs_num < 0
+        ):
+            raise ValueError("max_gs_num must be a nonnegative integer or None")
 
     def initialize_state(self, scene_scale: float = 1.0) -> Dict[str, Any]:
         """Initialize and return the running state for this strategy.
@@ -268,6 +285,12 @@ class DefaultStrategy(Strategy):
         state: Dict[str, Any],
         step: int,
     ) -> Tuple[int, int]:
+        capacity = None
+        if self.max_gs_num is not None:
+            capacity = self.max_gs_num - len(params["means"])
+            if capacity <= 0:
+                return 0, 0
+
         count = state["count"]
         grads = state["grad2d"] / count.clamp_min(1)
         device = grads.device
@@ -285,6 +308,20 @@ class DefaultStrategy(Strategy):
         if step < self.refine_scale2d_stop_iter:
             is_split |= state["radii"] > self.grow_scale2d
         n_split = is_split.sum().item()
+
+        if capacity is not None and n_dupli + n_split > capacity:
+            # Duplicate and two-child split each increase the total by one.
+            # Sample both kinds together so neither gets priority for the budget.
+            candidates = torch.cat((is_dupli, is_split))
+            candidate_ids = candidates.nonzero(as_tuple=True)[0]
+            selected = candidate_ids[
+                torch.randperm(len(candidate_ids), device=device)[:capacity]
+            ]
+            candidates.zero_()
+            candidates[selected] = True
+            is_dupli, is_split = candidates.chunk(2)
+            n_dupli = is_dupli.sum().item()
+            n_split = is_split.sum().item()
 
         # first duplicate
         if n_dupli > 0:

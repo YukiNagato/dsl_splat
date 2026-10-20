@@ -11,10 +11,10 @@ authors and contributors credited in its
 - Commit: [`4d3a3b69db4de0326f983ccf7b7b255271a17b01`](https://github.com/nerfstudio-project/gsplat/commit/4d3a3b69db4de0326f983ccf7b7b255271a17b01).
 - Source directory: [`gsplat/strategy/`](https://github.com/nerfstudio-project/gsplat/tree/4d3a3b69db4de0326f983ccf7b7b255271a17b01/gsplat/strategy).
 
-| Local file | Upstream source | Local changes at import |
+| Local file | Upstream source | Local changes |
 | --- | --- | --- |
 | `base.py` | [`gsplat/strategy/base.py`](https://github.com/nerfstudio-project/gsplat/blob/4d3a3b69db4de0326f983ccf7b7b255271a17b01/gsplat/strategy/base.py) | Body unchanged; final newline differs. |
-| `default.py` | [`gsplat/strategy/default.py`](https://github.com/nerfstudio-project/gsplat/blob/4d3a3b69db4de0326f983ccf7b7b255271a17b01/gsplat/strategy/default.py) | Body unchanged; final newline differs. |
+| `default.py` | [`gsplat/strategy/default.py`](https://github.com/nerfstudio-project/gsplat/blob/4d3a3b69db4de0326f983ccf7b7b255271a17b01/gsplat/strategy/default.py) | Adds an optional `max_gs_num` growth limit with joint random sampling of duplicate/split candidates. |
 | `ops.py` | [`gsplat/strategy/ops.py`](https://github.com/nerfstudio-project/gsplat/blob/4d3a3b69db4de0326f983ccf7b7b255271a17b01/gsplat/strategy/ops.py) | Locally edited subset: imports and helpers removed, optimizer helper renamed; adaptation is in progress. |
 | `__init__.py` | Local package marker | Does not copy upstream's strategy exports. |
 
@@ -33,7 +33,8 @@ copy does not transfer authorship to DSL Splat.
 
 When redistributing these files or derivatives, include the Apache-2.0 license,
 retain applicable upstream notices, and mark modified files as required by the
-license. The provenance header in `ops.py` identifies its local modification.
+license. The provenance headers in `default.py` and `ops.py` identify local
+modifications.
 
 This component's license is separate from the Gaussian-Splatting research
 license used by the renderer code in [../LICENSE.md](../LICENSE.md). Adding
