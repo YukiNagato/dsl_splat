@@ -63,9 +63,6 @@ The declared runtime dependencies are `torch>=2.0` and `warp-lang>=1.17`.
 The distribution is named `dsl-splat`, and the Python import name is
 `dsl_splat`.
 
-Warp compiles GPU kernels on first use and caches them for later calls.
-No manual CMake build or installation of the reference CUDA rasterizers is
-required.
 
 ## Minimal training demo
 

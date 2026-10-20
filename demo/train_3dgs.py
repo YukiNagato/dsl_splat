@@ -10,11 +10,11 @@ from tqdm import tqdm
 if __package__:
     from .colmap_dataset import Dataset
     from .model import GaussianContainer
-    from .utils import IndexRandomChooser, MovingAverager, psnr
+    from .utils import IndexRandomChooser, MovingAverager, psnr, set_random_seed
 else:
     from colmap_dataset import Dataset
     from model import GaussianContainer
-    from utils import IndexRandomChooser, MovingAverager, psnr
+    from utils import IndexRandomChooser, MovingAverager, psnr, set_random_seed
 
 
 @dataclass
@@ -31,6 +31,7 @@ class Config:
     rasterizer_type: Literal["3dgs", "aaa", "geer"] = "3dgs"
 
     # strategy params
+    max_gs_num: int | None = None
     prune_opa: float = 0.05
     grow_grad2d: float = 0.0005
     grow_scale3d: float = 0.01
@@ -38,9 +39,13 @@ class Config:
     refine_stop_iter: int = 15000
     reset_every: int = 5000
     refine_every: int = 100
+    # Pause clone/split/prune after reset; "auto" uses len(dataset), None disables.
+    pause_refine_after_reset: int | Literal["auto"] | None = None
+
     absgrad: bool = True
 
     # training params
+    seed: int = 42
     train_iters: int = 30000
     means_lr: float = 1e-4
     scales_lr: float = 0.01
@@ -98,6 +103,7 @@ def render_with_rasterizer(
 
 
 def main(cfg: Config):
+    set_random_seed(cfg.seed)
     device = "cuda"
     dataset = Dataset(data_root=cfg.data_root, im_stride=cfg.im_stride)
 
@@ -137,6 +143,7 @@ def main(cfg: Config):
     }
 
     strategy = DefaultStrategy(
+        max_gs_num=cfg.max_gs_num,
         prune_opa=cfg.prune_opa,
         grow_grad2d=cfg.grow_grad2d,
         grow_scale3d=cfg.grow_scale3d,
@@ -144,6 +151,11 @@ def main(cfg: Config):
         refine_stop_iter=cfg.refine_stop_iter,
         reset_every=cfg.reset_every,
         refine_every=cfg.refine_every,
+        pause_refine_after_reset=(
+            len(dataset) + 100
+            if cfg.pause_refine_after_reset == "auto"
+            else cfg.pause_refine_after_reset
+        ),
         absgrad=cfg.absgrad,
         revised_opacity=False,
         verbose=True,

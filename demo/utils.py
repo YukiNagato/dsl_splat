@@ -1,7 +1,15 @@
 import random
 from collections import deque
 import math
+import numpy as np
 import torch
+
+
+def set_random_seed(seed: int) -> None:
+    """Seed Python, NumPy and PyTorch on CPU and all CUDA devices."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
 
 class MovingAverager:

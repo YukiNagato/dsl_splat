@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Derived from gsplat v1.4.0, gsplat/strategy/default.py (gsplat contributors).
-# Modified for DSL Splat: optional max_gs_num growth budget and random sampling.
+# Modified for DSL Splat: growth budgets, GEER gradient-proxy conventions,
+# and optional refinement pauses after opacity resets.
 # See README.md and LICENSE in this directory for source and license details.
 
 from dataclasses import dataclass
@@ -35,6 +36,9 @@ class DefaultStrategy(Strategy):
     higher value, e.g., 0.0008. Also, the :func:`rasterization` function should be called
     with `absgrad=True` as well so that the absolute gradients are computed.
 
+    GEER's metadata selects its canonical gradient proxy instead of a
+    projected-mean gradient. That proxy is used without screen normalization.
+
     Args:
         prune_opa (float): GSs with opacity below this value will be pruned. Default is 0.005.
         grow_grad2d (float): GSs with image plane gradient above this value will be
@@ -53,9 +57,11 @@ class DefaultStrategy(Strategy):
         refine_stop_iter (int): Stop refining GSs after this iteration. Default is 15_000.
         reset_every (int): Reset opacities every this steps. Default is 3000.
         refine_every (int): Refine GSs every this steps. Default is 100.
-        pause_refine_after_reset (int): Pause refining GSs until this number of steps after
-          reset, Default is 0 (no pause at all) and one might want to set this number to the
-          number of images in training set.
+        pause_refine_after_reset (int, optional): Skip duplicating, splitting and pruning
+          for this many iterations following each actual opacity reset. Normal training
+          and running-statistic accumulation continue. None or 0 disables the pause.
+          Pass len(dataset) to wait one training epoch in a single-image training loop.
+          Default is None. Refinement on the reset step still precedes the reset.
         absgrad (bool): Use absolute gradients for GS splitting. Default is False.
         revised_opacity (bool): Whether to use revised opacity heuristic from
           arXiv:2404.06109 (experimental). Default is False.
@@ -97,7 +103,7 @@ class DefaultStrategy(Strategy):
     refine_stop_iter: int = 15_000
     reset_every: int = 3000
     refine_every: int = 100
-    pause_refine_after_reset: int = 0
+    pause_refine_after_reset: int | None = None
     absgrad: bool = False
     revised_opacity: bool = False
     verbose: bool = False
@@ -109,6 +115,13 @@ class DefaultStrategy(Strategy):
             not isinstance(self.max_gs_num, int) or self.max_gs_num < 0
         ):
             raise ValueError("max_gs_num must be a nonnegative integer or None")
+        if self.pause_refine_after_reset is not None and (
+            type(self.pause_refine_after_reset) is not int
+            or self.pause_refine_after_reset < 0
+        ):
+            raise ValueError(
+                "pause_refine_after_reset must be a nonnegative integer or None"
+            )
 
     def initialize_state(self, scene_scale: float = 1.0) -> Dict[str, Any]:
         """Initialize and return the running state for this strategy.
@@ -121,7 +134,12 @@ class DefaultStrategy(Strategy):
         # - grad2d: running accum of the norm of the image plane gradients for each GS.
         # - count: running accum of how many time each GS is visible.
         # - radii: the radii of the GSs (normalized by the image resolution).
-        state = {"grad2d": None, "count": None, "scene_scale": scene_scale}
+        state = {
+            "grad2d": None,
+            "count": None,
+            "scene_scale": scene_scale,
+            "last_reset_step": None,
+        }
         if self.refine_scale2d_stop_iter > 0:
             state["radii"] = None
         return state
@@ -181,10 +199,17 @@ class DefaultStrategy(Strategy):
 
         self._update_state(params, state, info, packed=packed)
 
+        last_reset_step = state.get("last_reset_step")
+        pause_steps = self.pause_refine_after_reset or 0
+        refine_paused = (
+            pause_steps > 0
+            and last_reset_step is not None
+            and step <= last_reset_step + pause_steps
+        )
         if (
             step > self.refine_start_iter
             and step % self.refine_every == 0
-            and step % self.reset_every >= self.pause_refine_after_reset
+            and not refine_paused
         ):
             # grow GSs
             n_dupli, n_split = self._grow_gs(params, optimizers, state, step)
@@ -216,6 +241,7 @@ class DefaultStrategy(Strategy):
                 state=state,
                 value=self.prune_opa * 2.0,
             )
+            state["last_reset_step"] = step
 
     def _update_state(
         self,
@@ -234,13 +260,15 @@ class DefaultStrategy(Strategy):
         ]:
             assert key in info, f"{key} is required but missing."
 
-        # normalize grads to [-1, 1] screen space
         if self.absgrad:
             grads = info[self.key_for_gradient].absgrad.clone()
         else:
             grads = info[self.key_for_gradient].grad.clone()
-        grads[..., 0] *= info["width"] / 2.0 * info["n_cameras"]
-        grads[..., 1] *= info["height"] / 2.0 * info["n_cameras"]
+        # Projected-mean gradients need normalized screen coordinates. GEER's
+        # canonical proxy already has its own scaling and is not a pixel VJP.
+        if info.get("screen_gradient_mode") != "geer_canonical_proxy":
+            grads[..., 0] *= info["width"] / 2.0 * info["n_cameras"]
+            grads[..., 1] *= info["height"] / 2.0 * info["n_cameras"]
 
         # initialize state on the first run
         n_gaussian = len(list(params.values())[0])

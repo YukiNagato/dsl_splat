@@ -35,6 +35,25 @@ The default backend is original 3DGS; `--rasterizer-type aaa` selects AAA and
 `--rasterizer-type geer` selects GEER. The trained Gaussians are saved to
 `splat.ply` by default; change `--ply-save-path` to choose another output path.
 
+Both training scripts use seed `42` by default for Python, NumPy and PyTorch
+(CPU and CUDA), set before data loading and model initialization. Pass
+`--seed 123` to use a different seed.
+
+Both scripts can pause cloning, splitting and pruning after opacity resets:
+
+- `--pause-refine-after-reset None` (default), or `0`: no pause.
+- `--pause-refine-after-reset 200`: pause for the next 200 training iterations.
+- `--pause-refine-after-reset auto`: use `len(dataset)` iterations, one epoch
+  in these single-image training loops.
+
+Normal optimization and densification-statistic accumulation continue during
+the pause. A reset at step 1000 with a 200-iteration pause freezes refinement
+at steps 1001–1200; it resumes at the first scheduled `refine_every` step after
+1200. Refinement on the reset step still happens before the reset. Each further
+reset restarts the pause; a pause at least as long as `reset_every` prevents
+refinement between resets. When using `DefaultStrategy` directly, pass an
+integer or `None`; resolve `"auto"` to `len(dataset)` in the training code.
+
 See the script's `Config` dataclass and `--help` for command-line options:
 
 ```bash
@@ -71,6 +90,20 @@ camera-Z depth is recovered from those attributes; it does not use GEER's
 inverse radial depth. GEER's densification gradient is a canonical-space proxy,
 so `grow_grad2d` may need different tuning from 3DGS/AAA. See the
 [GEER gradient conventions](../dsl_splat/geer/README.md#gradients-and-metadata).
+
+`DefaultStrategy` uses GEER's proxy directly, without the pixel-gradient
+`width/2`, `height/2` normalization used for 3DGS/AAA. Earlier versions applied
+that normalization to GEER as well, greatly increasing growth scores.
+
+To control growth, increase `--grow-grad2d` (affects both cloning and splitting),
+or increase `--refine-every` to grow less often. `--grow-scale3d` separates
+clone candidates from split candidates; it is not a limit on total growth.
+Both demos accept `--max-gs-num 500000` to cap growth. Existing Gaussians above
+that budget are not automatically pruned. Leave headroom for temporary
+split/optimizer allocations and tile intersections;
+the count limit is not a GPU-memory limit. GEER's original trainer uses a
+300-step densification interval; this is a useful starting point to try with
+`--refine-every 300`, rather than the demos' 100-step default.
 
 Images are RGB HWC, and camera poses are ordinary OpenCV world-to-camera
 matrices. Rendered plane attributes come from `info["render_extra_signals"]`.
