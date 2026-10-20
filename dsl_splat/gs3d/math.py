@@ -2,15 +2,7 @@
 
 import warp as wp
 
-from ..primitives.math import glm_rotation
-
-
-@wp.func_native(
-    "return fmaf(a,b,c);",
-    adj_snippet="adj_a += b * adj_ret; adj_b += a * adj_ret; adj_c += adj_ret;",
-)
-def fused_multiply_add(a: float, b: float, c: float) -> float:
-    pass
+from ..primitives.math import fused_multiply_add, glm_rotation
 
 
 @wp.func

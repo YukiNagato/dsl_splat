@@ -31,9 +31,9 @@ python demo/train_3dgs.py --data-root /path/to/scene --im-stride 1
 ```
 
 Use `--im-stride 8` if your scene provides downsampled images in `images_8/`.
-The default backend is original 3DGS; `--rasterizer-type aaa` selects the AAA
-adapter. The trained Gaussians are saved to `splat.ply` by default; change
-`--ply-save-path` to choose another output path.
+The default backend is original 3DGS; `--rasterizer-type aaa` selects AAA and
+`--rasterizer-type geer` selects GEER. The trained Gaussians are saved to
+`splat.ply` by default; change `--ply-save-path` to choose another output path.
 
 See the script's `Config` dataclass and `--help` for command-line options:
 
@@ -51,12 +51,26 @@ in the training script. These settings may need adjustment for your scene.
 consistency, and multi-view geometry/NCC supervision. Its training outline
 follows PGSR; plane geometry and losses live in
 [`dsl_splat.pgsr`](../dsl_splat/pgsr/README.md), including the RaDe-GS-style
-[Warp patch NCC](../dsl_splat/pgsr/patch_ncc.py). It uses DSL Splat's existing 3DGS or AAA
-renderer and DefaultStrategy, rather than reproducing every PGSR training option.
+[Warp patch NCC](../dsl_splat/pgsr/patch_ncc.py). It uses DSL Splat's existing
+3DGS, AAA or GEER renderer and DefaultStrategy, rather than reproducing every
+PGSR training option.
 
 ```bash
 python -m demo.train_pgsr --data-root /path/to/scene --im-stride 8
 ```
+
+Both demos accept `--rasterizer-type geer`, for example:
+
+```bash
+python -m demo.train_3dgs --data-root /path/to/scene --im-stride 8 --rasterizer-type geer
+python -m demo.train_pgsr --data-root /path/to/scene --im-stride 8 --rasterizer-type geer
+```
+
+GEER blends the same extra plane attributes used by the PGSR demo. PGSR's
+camera-Z depth is recovered from those attributes; it does not use GEER's
+inverse radial depth. GEER's densification gradient is a canonical-space proxy,
+so `grow_grad2d` may need different tuning from 3DGS/AAA. See the
+[GEER gradient conventions](../dsl_splat/geer/README.md#gradients-and-metadata).
 
 Images are RGB HWC, and camera poses are ordinary OpenCV world-to-camera
 matrices. Rendered plane attributes come from `info["render_extra_signals"]`.

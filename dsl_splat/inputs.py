@@ -173,8 +173,10 @@ def normalize_inputs(
     extras: Tensor | None,
     filter3D: Tensor | None,
     sh_degree: int | None,
+    *,
+    normalize_quats: bool = True,
 ) -> Inputs:
-    """Check layouts once and normalize quaternions with Torch gradients."""
+    """Check layouts, optionally delegating quaternion normalization to a kernel."""
     extra_signals = extras
     if (
         not isinstance(means, torch.Tensor)
@@ -246,7 +248,11 @@ def normalize_inputs(
         cameras,
         device,
         _batch_views(means, batch_count, (n, 3)),
-        _batch_views(F.normalize(quats, dim=-1), batch_count, (n, 4)),
+        _batch_views(
+            F.normalize(quats, dim=-1) if normalize_quats else quats,
+            batch_count,
+            (n, 4),
+        ),
         _batch_views(scales, batch_count, (n, 3)),
         _batch_views(opacities, batch_count, (n,)),
         viewmats.reshape(batch_count, cameras, 4, 4),

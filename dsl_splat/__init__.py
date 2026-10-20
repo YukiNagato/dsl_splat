@@ -1,6 +1,6 @@
 """DSL Splat: Warp Gaussian renderers; top-level rendering exports select AAA.
 
-Use dsl_splat.aaa or dsl_splat.gs3d for method-local APIs and adapters.
+Use dsl_splat.aaa, dsl_splat.gs3d or dsl_splat.geer for method-local APIs.
 """
 
 from .aaa.preprocess import preprocess

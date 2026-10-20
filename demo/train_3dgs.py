@@ -2,13 +2,19 @@ import torch
 from dsl_splat.strategy.default import DefaultStrategy
 from dsl_splat.metrics import fused_ssim
 from dataclasses import dataclass
-from colmap_dataset import Dataset, ImageFrame
-from model import GaussianContainer
-from typing import List, Dict, Any, Tuple, Literal, Callable
+from typing import Any, Literal, Callable
 import tyro
 from pathlib import Path
-from utils import IndexRandomChooser, MovingAverager, psnr
 from tqdm import tqdm
+
+if __package__:
+    from .colmap_dataset import Dataset
+    from .model import GaussianContainer
+    from .utils import IndexRandomChooser, MovingAverager, psnr
+else:
+    from colmap_dataset import Dataset
+    from model import GaussianContainer
+    from utils import IndexRandomChooser, MovingAverager, psnr
 
 
 @dataclass
@@ -22,7 +28,7 @@ class Config:
     sh_degree: int = 3
     sh_degree_interval: int = 2000
     random_gs_num: int = 50000
-    rasterizer_type: Literal["3dgs", "aaa"] = "3dgs"
+    rasterizer_type: Literal["3dgs", "aaa", "geer"] = "3dgs"
 
     # strategy params
     prune_opa: float = 0.05
@@ -46,12 +52,16 @@ class Config:
 
 
 def render_with_rasterizer(
-        rasterizer: Callable, 
-        gaussian: GaussianContainer, 
-        K: torch.Tensor, 
-        viewmat: torch.Tensor, 
-        H: int, W: int, 
-        sh_degree_to_use: int = None) -> Tuple[torch.Tensor, torch.Tensor, dict]:
+    rasterizer: Callable,
+    gaussian: GaussianContainer,
+    K: torch.Tensor,
+    viewmat: torch.Tensor,
+    H: int,
+    W: int,
+    sh_degree_to_use: int | None = None,
+    *,
+    absgrad: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
     means = gaussian.gauss_params["means"]
     scales = gaussian.gauss_params["scales"]
     opacities = gaussian.gauss_params["opacities"]
@@ -61,6 +71,9 @@ def render_with_rasterizer(
     colors = torch.cat((features_dc[:, None, :], features_rest), dim=1)
     if gaussian.sh_degree == 0:
         colors = torch.sigmoid(colors).squeeze(1)
+        degree = None
+    else:
+        degree = gaussian.sh_degree if sh_degree_to_use is None else sh_degree_to_use
     render, alpha, info = rasterizer(
         means=means,
         quats=quats,
@@ -75,9 +88,9 @@ def render_with_rasterizer(
         near_plane=0.001,
         far_plane=1e10,
         render_mode="RGB",
-        sh_degree=sh_degree_to_use,
+        sh_degree=degree,
         sparse_grad=False,
-        absgrad=True,
+        absgrad=absgrad,
         rasterize_mode="classic",
         camera_model="pinhole",
     )
@@ -85,13 +98,15 @@ def render_with_rasterizer(
 
 
 def main(cfg: Config):
-    device = 'cuda'
+    device = "cuda"
     dataset = Dataset(data_root=cfg.data_root, im_stride=cfg.im_stride)
 
     if cfg.rasterizer_type == "3dgs":
         from dsl_splat.gs3d.gsplat import rasterization
     elif cfg.rasterizer_type == "aaa":
         from dsl_splat.aaa.gsplat import rasterization
+    elif cfg.rasterizer_type == "geer":
+        from dsl_splat.geer.gsplat import rasterization
     else:
         raise ValueError(f"Invalid rasterizer type: {cfg.rasterizer_type}")
 
@@ -110,7 +125,9 @@ def main(cfg: Config):
         "means": torch.optim.Adam([gaussian.gauss_params["means"]], lr=cfg.means_lr),
         "scales": torch.optim.Adam([gaussian.gauss_params["scales"]], lr=cfg.scales_lr),
         "quats": torch.optim.Adam([gaussian.gauss_params["quats"]], lr=cfg.quats_lr),
-        "opacities": torch.optim.Adam([gaussian.gauss_params["opacities"]], lr=cfg.opacities_lr),
+        "opacities": torch.optim.Adam(
+            [gaussian.gauss_params["opacities"]], lr=cfg.opacities_lr
+        ),
         "features_dc": torch.optim.Adam(
             [gaussian.gauss_params["features_dc"]], lr=cfg.features_dc_lr
         ),
@@ -131,6 +148,7 @@ def main(cfg: Config):
         revised_opacity=False,
         verbose=True,
     )
+    strategy.check_sanity(gaussian.gauss_params, optimizers_dict)
 
     # you may need to change scene_scale according to your dataset
     strategy_state = strategy.initialize_state(scene_scale=1.0)
@@ -149,9 +167,12 @@ def main(cfg: Config):
             frame.w2c.to(device),
             frame.image.shape[0],
             frame.image.shape[1],
-            sh_degree_to_use
+            sh_degree_to_use,
+            absgrad=cfg.absgrad,
         )
-        strategy.step_pre_backward(gaussian.gauss_params, optimizers, state, step, info)
+        strategy.step_pre_backward(
+            gaussian.gauss_params, optimizers_dict, strategy_state, step, info
+        )
 
         rgb = render[:, ..., :3]
         rgb = rgb.squeeze(0)

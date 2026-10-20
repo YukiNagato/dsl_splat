@@ -14,6 +14,7 @@ CUDA implementations, and have started using this code in my own projects.
 | --- | --- |
 | [Original 3DGS](dsl_splat/gs3d/) | Gaussian projection, tile-based depth sorting, alpha blending, and backward propagation. |
 | [AAA-Gaussians](dsl_splat/aaa/) | Adaptive 3D antialiasing, 3D Gaussian evaluation, StopThePop hierarchical sorting, and backward propagation. |
+| [3DGEER](dsl_splat/geer/README.md) | PBF association, exact ray–Gaussian evaluation, radial sorting, and backward propagation for pinhole, BEAP and Kannala–Brandt cameras. Initial implementation; performance is still being evaluated. |
 | [PGSR](dsl_splat/pgsr/README.md) | Plane geometry, flattening and normal consistency losses, and multiview geometry/NCC supervision using the 3DGS or AAA renderer. |
 
 The 3DGS and AAA renderers support RGB and SH0–3 rendering, alpha blending of arbitrary
@@ -24,10 +25,11 @@ They accept OpenCV-style world-to-camera `viewmats` and pinhole intrinsics `Ks`.
 Each renderer has its own rendering API and low-level operations:
 
 ```python
-from dsl_splat import aaa, gs3d
+from dsl_splat import aaa, gs3d, geer
 
 result = gs3d.rasterize(...)
 result = aaa.rasterize(...)
+result = geer.rasterize(...)
 ```
 
 ## gsplat-style interfaces
@@ -40,11 +42,12 @@ gsplat-style `rasterization` adapter:
 from dsl_splat.gs3d.gsplat import rasterization  # Original 3DGS
 # Or select AAA-Gaussians:
 # from dsl_splat.aaa.gsplat import rasterization
+# from dsl_splat.geer.gsplat import rasterization
 ```
 
 **This is not an implementation of gsplat.** The adapters support a subset of
-its interface; rendering and gradients come from the selected 3DGS or
-AAA-Gaussians implementation. Supported options and numerical behavior depend
+its interface; rendering and gradients come from the selected method
+implementation. Supported options and numerical behavior depend
 on the method. The gsplat package is not required for rendering.
 
 ## Installation

@@ -19,6 +19,7 @@ dsl_splat = ["py.typed", "*.md", "STOPTHEPOP_LICENSE.txt"]
 "dsl_splat.strategy" = ["LICENSE", "*.md"]
 "dsl_splat.pgsr" = ["*.md", "*_LICENSE.txt"]
 "dsl_splat.metrics" = ["*.md", "*_LICENSE.txt"]
+"dsl_splat.geer" = ["*.md", "*_LICENSE.txt"]
 
 [tool.black]
 target-version = ["py310"]
@@ -42,4 +43,5 @@ files = [
     "dsl_splat/primitives/spherical_harmonics.py",
     "dsl_splat/pgsr/geometry.py", "dsl_splat/pgsr/losses.py", "dsl_splat/pgsr/types.py",
     "dsl_splat/metrics/ssim.py",
+    "dsl_splat/geer/api.py", "dsl_splat/geer/ops.py", "dsl_splat/geer/gsplat.py",
 ]

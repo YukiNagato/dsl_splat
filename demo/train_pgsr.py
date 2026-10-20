@@ -184,7 +184,7 @@ class Config:
     sh_degree: int = 3
     sh_degree_interval: int = 2000
     random_gs_num: int = 50000
-    rasterizer_type: Literal["3dgs", "aaa"] = "3dgs"
+    rasterizer_type: Literal["3dgs", "aaa", "geer"] = "3dgs"
 
     # Densification parameters.
     prune_opa: float = 0.05
@@ -285,8 +285,12 @@ def main(cfg: Config) -> None:
     )
     if cfg.rasterizer_type == "3dgs":
         from dsl_splat.gs3d.gsplat import rasterization
-    else:
+    elif cfg.rasterizer_type == "aaa":
         from dsl_splat.aaa.gsplat import rasterization
+    elif cfg.rasterizer_type == "geer":
+        from dsl_splat.geer.gsplat import rasterization
+    else:
+        raise ValueError(f"Invalid rasterizer type: {cfg.rasterizer_type}")
 
     gaussian = GaussianContainer(
         xyz=dataset.points_xyz,

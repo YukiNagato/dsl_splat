@@ -11,6 +11,15 @@ These self-contained snippets are automatically JIT compiled by Warp.
 import warp as wp
 
 
+@wp.func_native(
+    "return fmaf(a,b,c);",
+    adj_snippet="adj_a += b * adj_ret; adj_b += a * adj_ret; adj_c += adj_ret;",
+)
+def fused_multiply_add(a: float, b: float, c: float) -> float:
+    """Explicit FP32 FMA for reference arithmetic and stable sorting keys."""
+    pass
+
+
 @wp.func_native(r"""
     return wp::vec_t<3,float>(
         sqrtf(__fadd_rn(__fmul_rn(scale[0],scale[0]),filter_variance)),

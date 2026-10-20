@@ -49,3 +49,14 @@ The Warp SSIM metric adapts the filtering structure and coefficients from
 Rahul Goel's fused-ssim (MIT, 2024). Source revision and local changes are
 recorded in [metrics/README.md](metrics/README.md); the upstream terms are
 retained in [metrics/FUSED_SSIM_LICENSE.txt](metrics/FUSED_SSIM_LICENSE.txt).
+
+## 3DGEER
+
+The `geer/` component adapts Bosch Research's 3DGEER PBF and ray-evaluation
+rasterizer. Source revision, adapted files, and local changes are recorded in
+[geer/README.md](geer/README.md). Upstream's root GNU AGPLv3 license is preserved
+in [geer/GEER_LICENSE.txt](geer/GEER_LICENSE.txt); the rasterizer subdirectory's
+Inria/MPII Gaussian-Splatting license is preserved in
+[geer/GEER_RASTERIZER_LICENSE.txt](geer/GEER_RASTERIZER_LICENSE.txt).
+These component-specific notices do not replace the upstream license texts
+or relicense other components.
