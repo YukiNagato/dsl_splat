@@ -18,6 +18,9 @@ from ..primitives.tiling import TileBins
 from ..runtime.dispatch import FrameBindings
 from ..runtime.gradients import AbsGradientTarget
 
+# Fixed variance added by geometry.py's canonical transform.
+FILTER_VARIANCE = 1.0e-7
+
 
 @dataclass(slots=True)
 class RasterizationResult:
@@ -196,6 +199,7 @@ def _render_view(
         height=camera.height,
         n_cameras=1,
         backend="geer-warp",
+        opacity_filter_variance=FILTER_VARIANCE,
         screen_gradient_mode="geer_canonical_proxy",
         supports_means2d_grad=True,
     )

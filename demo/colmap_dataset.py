@@ -110,6 +110,17 @@ class Dataset:
             frame.set_intrinsic(K)
             self.frames.append(frame)
 
+    @property
+    def scene_scale(self) -> float:
+        """Camera extent in COLMAP world units, following the original 3DGS trainer."""
+        if len(self.frames) < 2:
+            return 1.0
+        centers = torch.stack(
+            [-frame.w2c[:3, :3].T @ frame.w2c[:3, 3] for frame in self.frames]
+        )
+        radius = float((centers - centers.mean(dim=0)).norm(dim=-1).max())
+        return 1.1 * radius if radius > 0 else 1.0
+
     def __len__(self):
         return len(self.frames)
 

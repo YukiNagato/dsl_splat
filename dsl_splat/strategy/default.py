@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Derived from gsplat v1.4.0, gsplat/strategy/default.py (gsplat contributors).
 # Modified for DSL Splat: growth budgets, GEER gradient-proxy conventions,
-# and optional refinement pauses after opacity resets.
+# filter-aware opacity resets, and optional refinement pauses after resets.
 # See README.md and LICENSE in this directory for source and license details.
 
 from dataclasses import dataclass
@@ -38,6 +38,8 @@ class DefaultStrategy(Strategy):
 
     GEER's metadata selects its canonical gradient proxy instead of a
     projected-mean gradient. That proxy is used without screen normalization.
+    Its opacity reset caps filtered opacity using the renderer's 3D filter
+    variance, rather than suppressing small Gaussians a second time.
 
     Args:
         prune_opa (float): GSs with opacity below this value will be pruned. Default is 0.005.
@@ -240,6 +242,7 @@ class DefaultStrategy(Strategy):
                 optimizers=optimizers,
                 state=state,
                 value=self.prune_opa * 2.0,
+                opacity_filter_variance=info.get("opacity_filter_variance"),
             )
             state["last_reset_step"] = step
 

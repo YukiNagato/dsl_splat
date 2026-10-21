@@ -2,7 +2,8 @@
 # Derived from gsplat v1.4.0, gsplat/strategy/ops.py (gsplat contributors).
 # Upstream commit: 4d3a3b69db4de0326f983ccf7b7b255271a17b01.
 # Modified for DSL Splat: selected helpers/imports removed and the optimizer
-# helper renamed; this local adaptation is in progress.
+# helper renamed; opacity resets optionally account for a 3D Gaussian filter.
+# This local adaptation is in progress.
 # See README.md and LICENSE in this directory for source and license details.
 
 import numpy as np
@@ -207,19 +208,37 @@ def reset_opa(
     optimizers: Dict[str, torch.optim.Optimizer],
     state: Dict[str, Tensor],
     value: float,
+    *,
+    opacity_filter_variance: float | None = None,
 ):
-    """Inplace reset the opacities to the given post-sigmoid value.
+    """Cap opacity and clear its optimizer moments.
 
     Args:
         params: A dictionary of parameters.
         optimizers: A dictionary of optimizers, each corresponding to a parameter.
-        value: The value to reset the opacities
+        value: Maximum post-sigmoid opacity, or maximum filtered opacity when
+            opacity_filter_variance is supplied.
+        opacity_filter_variance: Isotropic variance added to the 3D covariance.
+            Compensate the raw-opacity cap for the filter's determinant ratio,
+            as in GEER's original training code. Scales are log-parameterized.
+            None retains the ordinary unfiltered reset.
     """
 
     def param_fn(name: str, p: Tensor) -> Tensor:
         if name == "opacities":
-            opacities = torch.clamp(p, max=torch.logit(torch.tensor(value)).item())
-            return torch.nn.Parameter(opacities)
+            if opacity_filter_variance is None:
+                opacities = torch.clamp(p, max=torch.logit(torch.tensor(value)).item())
+            else:
+                scales = params["scales"].exp()
+                compensation = (
+                    scales / (scales.square() + opacity_filter_variance).sqrt()
+                ).prod(dim=-1)
+                # A factor below value requires no reduction. Clamp before
+                # logit so zero/tiny factors yield an infinite upper bound,
+                # leaving the existing finite parameter unchanged.
+                limit = (value / compensation).clamp_max(1.0)
+                opacities = torch.minimum(p, torch.logit(limit).reshape_as(p))
+            return torch.nn.Parameter(opacities, requires_grad=p.requires_grad)
         else:
             raise ValueError(f"Unexpected parameter name: {name}")
 

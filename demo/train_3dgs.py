@@ -32,14 +32,18 @@ class Config:
 
     # strategy params
     max_gs_num: int | None = None
+    # None estimates the scene extent from camera centers; use 1.0 for the old behavior.
+    scene_scale: float | None = None
+
     prune_opa: float = 0.05
+    prune_scale3d: float = 0.1  # Relative to scene_scale; inf disables size pruning.
     grow_grad2d: float = 0.0005
     grow_scale3d: float = 0.01
     refine_start_iter: int = 500
     refine_stop_iter: int = 15000
     reset_every: int = 5000
     refine_every: int = 100
-    # Pause clone/split/prune after reset; "auto" uses len(dataset), None disables.
+    # Pause clone/split/prune after reset; "auto" uses len(dataset) + 100, None disables.
     pause_refine_after_reset: int | Literal["auto"] | None = None
 
     absgrad: bool = True
@@ -145,6 +149,7 @@ def main(cfg: Config):
     strategy = DefaultStrategy(
         max_gs_num=cfg.max_gs_num,
         prune_opa=cfg.prune_opa,
+        prune_scale3d=cfg.prune_scale3d,
         grow_grad2d=cfg.grow_grad2d,
         grow_scale3d=cfg.grow_scale3d,
         refine_start_iter=cfg.refine_start_iter,
@@ -162,8 +167,8 @@ def main(cfg: Config):
     )
     strategy.check_sanity(gaussian.gauss_params, optimizers_dict)
 
-    # you may need to change scene_scale according to your dataset
-    strategy_state = strategy.initialize_state(scene_scale=1.0)
+    scene_scale = dataset.scene_scale if cfg.scene_scale is None else cfg.scene_scale
+    strategy_state = strategy.initialize_state(scene_scale=scene_scale)
 
     for step in tqdm(range(cfg.train_iters), desc="train"):
         for key, optimizer in optimizers_dict.items():

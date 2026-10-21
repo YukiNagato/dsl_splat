@@ -14,8 +14,8 @@ authors and contributors credited in its
 | Local file | Upstream source | Local changes |
 | --- | --- | --- |
 | `base.py` | [`gsplat/strategy/base.py`](https://github.com/nerfstudio-project/gsplat/blob/4d3a3b69db4de0326f983ccf7b7b255271a17b01/gsplat/strategy/base.py) | Body unchanged; final newline differs. |
-| `default.py` | [`gsplat/strategy/default.py`](https://github.com/nerfstudio-project/gsplat/blob/4d3a3b69db4de0326f983ccf7b7b255271a17b01/gsplat/strategy/default.py) | Adds an optional `max_gs_num` growth limit with joint random sampling of duplicate/split candidates. Uses GEER's canonical gradient proxy without projected-mean screen scaling. Accepts `None` to disable the post-reset refinement pause and tracks actual opacity resets to define its window. |
-| `ops.py` | [`gsplat/strategy/ops.py`](https://github.com/nerfstudio-project/gsplat/blob/4d3a3b69db4de0326f983ccf7b7b255271a17b01/gsplat/strategy/ops.py) | Locally edited subset: imports and helpers removed, optimizer helper renamed; adaptation is in progress. |
+| `default.py` | [`gsplat/strategy/default.py`](https://github.com/nerfstudio-project/gsplat/blob/4d3a3b69db4de0326f983ccf7b7b255271a17b01/gsplat/strategy/default.py) | Adds an optional `max_gs_num` growth limit with joint random sampling of duplicate/split candidates. Uses GEER's canonical gradient proxy without projected-mean screen scaling and passes renderer filter metadata to opacity resets. Accepts `None` to disable the post-reset refinement pause and tracks actual opacity resets to define its window. |
+| `ops.py` | [`gsplat/strategy/ops.py`](https://github.com/nerfstudio-project/gsplat/blob/4d3a3b69db4de0326f983ccf7b7b255271a17b01/gsplat/strategy/ops.py) | Locally edited subset: imports and helpers removed, optimizer helper renamed, opacity reset optionally accounts for a 3D filter's determinant ratio; adaptation is in progress. |
 | `__init__.py` | Local package marker | Does not copy upstream's strategy exports. |
 
 The current code uses PyTorch. Warp implementations of MCMC and ImprovedGS

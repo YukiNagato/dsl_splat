@@ -8,7 +8,7 @@ from typing import Any
 import torch
 from torch import Tensor
 
-from .api import _prepare_view, _render_view
+from .api import FILTER_VARIANCE, _prepare_view, _render_view
 from .cameras import RayCamera
 from ..inputs import batch_item, normalize_inputs
 from ..training import prepare_training_metadata
@@ -183,6 +183,7 @@ def rasterization(
         tile_size=16,
         packed=packed,
         backend="geer-warp",
+        opacity_filter_variance=FILTER_VARIANCE,
         screen_gradient_mode="geer_canonical_proxy",
         supports_means2d_grad=True,
         inverse_depth=torch.stack(inverse).reshape(*prefix, 1),
