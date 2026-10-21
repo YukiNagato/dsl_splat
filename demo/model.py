@@ -52,7 +52,7 @@ class GaussianContainer(nn.Module):
         distances, _ = k_nearest(means.data, 3)
         distances = torch.from_numpy(distances)
         avg_dist = distances.mean(dim=-1, keepdim=True)
-        scales = torch.nn.Parameter(torch.log((avg_dist+0.001).repeat(1, 3)))
+        scales = torch.nn.Parameter(torch.log((avg_dist + 0.001).repeat(1, 3)))
         quats = torch.nn.Parameter(random_quat_tensor(num_gs).contiguous())
         opacities = torch.nn.Parameter(
             torch.logit(0.1 * torch.ones(num_gs, 1)).contiguous()
@@ -85,7 +85,10 @@ class GaussianContainer(nn.Module):
         )
 
     @torch.no_grad()
-    def save_ply(self, path: str):
+    def save_ply(
+        self, path: str, *, extra_attributes: dict[str, torch.Tensor] | None = None
+    ):
+        """Save raw Gaussian parameters, optionally with scalar per-GS fields."""
         import os
         import numpy as np
         from plyfile import PlyData, PlyElement
@@ -106,14 +109,13 @@ class GaussianContainer(nn.Module):
 
         # (N, K-1, 3) -> (N, 3*(K-1))
         features_rest = to_numpy(params["features_rest"])
-        features_rest = (
-            features_rest.transpose(0, 2, 1)
-            .reshape(xyz.shape[0], -1)
+        features_rest = features_rest.transpose(0, 2, 1).reshape(
+            xyz.shape[0], 3 * params["features_rest"].shape[1]
         )
 
         opacities = to_numpy(params["opacities"])  # (N, 1)
-        scales = to_numpy(params["scales"])        # (N, 3)
-        quats = to_numpy(params["quats"])          # (N, 4)
+        scales = to_numpy(params["scales"])  # (N, 3)
+        quats = to_numpy(params["quats"])  # (N, 4)
 
         attributes = (
             ["x", "y", "z", "nx", "ny", "nz"]
@@ -137,6 +139,20 @@ class GaussianContainer(nn.Module):
             axis=1,
         )
 
+        if extra_attributes:
+            extras = []
+            for name, value in extra_attributes.items():
+                if name in attributes or value.shape not in (
+                    (len(xyz),),
+                    (len(xyz), 1),
+                ):
+                    raise ValueError(
+                        f"Expected a unique scalar per-Gaussian attribute: {name}"
+                    )
+                attributes.append(name)
+                extras.append(to_numpy(value).reshape(len(xyz), 1))
+            data = np.concatenate([data, *extras], axis=1)
+
         dtype = [(name, "f4") for name in attributes]
         elements = np.empty(xyz.shape[0], dtype=dtype)
 
@@ -145,6 +161,3 @@ class GaussianContainer(nn.Module):
 
         vertex = PlyElement.describe(elements, "vertex")
         PlyData([vertex], text=False).write(path)
-
-    
-

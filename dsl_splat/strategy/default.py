@@ -237,14 +237,28 @@ class DefaultStrategy(Strategy):
             torch.cuda.empty_cache()
 
         if step % self.reset_every == 0:
-            reset_opa(
-                params=params,
-                optimizers=optimizers,
-                state=state,
-                value=self.prune_opa * 2.0,
-                opacity_filter_variance=info.get("opacity_filter_variance"),
-            )
+            self._reset_opacities(params, optimizers, state, info)
             state["last_reset_step"] = step
+
+    def _reset_opacities(
+        self,
+        params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
+        optimizers: Dict[str, torch.optim.Optimizer],
+        state: Dict[str, Any],
+        info: Dict[str, Any],
+    ) -> None:
+        """Reset policy hook, after this step's growth and pruning.
+
+        Methods with per-Gaussian filters can override this to use freshly
+        recomputed filter widths and their own filtered-opacity cap.
+        """
+        reset_opa(
+            params=params,
+            optimizers=optimizers,
+            state=state,
+            value=self.prune_opa * 2.0,
+            opacity_filter_variance=info.get("opacity_filter_variance"),
+        )
 
     def _update_state(
         self,

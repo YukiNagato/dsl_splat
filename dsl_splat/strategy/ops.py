@@ -209,7 +209,7 @@ def reset_opa(
     state: Dict[str, Tensor],
     value: float,
     *,
-    opacity_filter_variance: float | None = None,
+    opacity_filter_variance: float | Tensor | None = None,
 ):
     """Cap opacity and clear its optimizer moments.
 
@@ -218,7 +218,8 @@ def reset_opa(
         optimizers: A dictionary of optimizers, each corresponding to a parameter.
         value: Maximum post-sigmoid opacity, or maximum filtered opacity when
             opacity_filter_variance is supplied.
-        opacity_filter_variance: Isotropic variance added to the 3D covariance.
+        opacity_filter_variance: Isotropic variance added to the 3D covariance,
+            either a scalar or per-Gaussian (N,1) tensor.
             Compensate the raw-opacity cap for the filter's determinant ratio,
             as in GEER's original training code. Scales are log-parameterized.
             None retains the ordinary unfiltered reset.

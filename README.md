@@ -14,10 +14,11 @@ CUDA implementations, and have started using this code in my own projects.
 | --- | --- |
 | [Original 3DGS](dsl_splat/gs3d/) | Gaussian projection, tile-based depth sorting, alpha blending, and backward propagation. |
 | [AAA-Gaussians](dsl_splat/aaa/) | Adaptive 3D antialiasing, 3D Gaussian evaluation, StopThePop hierarchical sorting, and backward propagation. |
-| [3DGEER](dsl_splat/geer/README.md) | PBF association, exact ray–Gaussian evaluation, radial sorting, and backward propagation for pinhole, BEAP and Kannala–Brandt cameras. Initial implementation; performance is still being evaluated. |
-| [PGSR](dsl_splat/pgsr/README.md) | Plane geometry, flattening and normal consistency losses, and multiview geometry/NCC supervision using the 3DGS or AAA renderer. |
+| [3DGEER](dsl_splat/geer/) | PBF association, exact ray–Gaussian evaluation, radial sorting, and backward propagation for pinhole, BEAP and Kannala–Brandt cameras. Initial implementation; performance is still being evaluated. |
+| [RaDe-GS](dsl_splat/rade/) | 3DGS-style splatting with radial sorting, ray-plane expected/median depth, camera-space normals, and backward propagation. |
+| [PGSR](dsl_splat/pgsr/) | Plane geometry, flattening and normal consistency losses, and multiview geometry/NCC supervision using the 3DGS or AAA renderer. |
 
-The 3DGS and AAA renderers support RGB and SH0–3 rendering, alpha blending of arbitrary
+The 3DGS, AAA and RaDe renderers support RGB and SH0–3 rendering, alpha blending of arbitrary
 feature channels, first-order Gaussian/feature/camera-pose gradients, and
 screen-space gradient metadata for densification, including absolute gradients.
 They accept OpenCV-style world-to-camera `viewmats` and pinhole intrinsics `Ks`.
@@ -25,11 +26,12 @@ They accept OpenCV-style world-to-camera `viewmats` and pinhole intrinsics `Ks`.
 Each renderer has its own rendering API and low-level operations:
 
 ```python
-from dsl_splat import aaa, gs3d, geer
+from dsl_splat import aaa, gs3d, geer, rade
 
 result = gs3d.rasterize(...)
 result = aaa.rasterize(...)
 result = geer.rasterize(...)
+result = rade.rasterize(...)
 ```
 
 ## gsplat-style interfaces
@@ -43,6 +45,7 @@ from dsl_splat.gs3d.gsplat import rasterization  # Original 3DGS
 # Or select AAA-Gaussians:
 # from dsl_splat.aaa.gsplat import rasterization
 # from dsl_splat.geer.gsplat import rasterization
+# from dsl_splat.rade.gsplat import rasterization
 ```
 
 **This is not an implementation of gsplat.** The adapters support a subset of

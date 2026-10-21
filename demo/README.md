@@ -66,3 +66,16 @@ geometry weights, plane depth, depth normals, and image-gradient weights.
 Example debug output from the garden scene:
 
 ![PGSR-style debug grid for the garden scene](assets/pgsr_garden_debug_example.jpg)
+
+## RaDe-GS training
+
+[train_radegs.py](train_radegs.py) uses the native RaDe renderer's expected and
+median Z depth and camera-space normals. It trains RGB with L1/SSIM, adds cosine
+consistency between rendered and depth-derived normals, and reuses the
+multi-view geometry/Warp NCC helpers. It does not apply PGSR's flatten loss. Note it
+uses `DefaultStrategy` instead of upstream's GOF/quantile densification.
+
+```bash
+python -m demo.train_radegs --data-root /path/to/scene --im-stride 8 \
+    --ply-save-path radegs.ply --debug-save-path debug/radegs
+```

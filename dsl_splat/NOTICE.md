@@ -60,3 +60,11 @@ Inria/MPII Gaussian-Splatting license is preserved in
 [geer/GEER_RASTERIZER_LICENSE.txt](geer/GEER_RASTERIZER_LICENSE.txt).
 These component-specific notices do not replace the upstream license texts
 or relicense other components.
+
+## RaDe-GS
+
+The `rade/` renderer ports HKUST-SAIL's RaDe-GS CUDA rasterizer to Warp.
+It shares the Inria-derived projected-splat components in `splatting/` with
+`gs3d/`. Source revision, implemented stages and numerical conventions are
+recorded in [rade/README.md](rade/README.md). The upstream rasterizer license is
+preserved in [rade/RADE_LICENSE.txt](rade/RADE_LICENSE.txt).
