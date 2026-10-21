@@ -35,7 +35,7 @@ class ImageFrame:
         self.cy = float(K[1, 2])
 
     @classmethod
-    def from_colmap_image(cls, root: Path, im: Image):
+    def from_colmap_image(cls, root: Path, im: Image, *, im_stride: int = 1):
         qvec = im.qvec
         tvec = im.tvec
         w2c = np.identity(4)
@@ -46,6 +46,13 @@ class ImageFrame:
         if image is None:
             raise FileNotFoundError(f"Could not read image: {im_path}")
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        if im_stride > 1:
+            height, width = image.shape[:2]
+            image = cv2.resize(
+                image,
+                (max(1, width // im_stride), max(1, height // im_stride)),
+                interpolation=cv2.INTER_AREA,
+            )
         height, width = image.shape[:2]
         image = torch.from_numpy(image).float() / 255
         w2c = torch.from_numpy(w2c).float()
@@ -54,11 +61,17 @@ class ImageFrame:
 
 
 class Dataset:
-    def __init__(self, data_root: Path, im_stride=8):
+    def __init__(self, data_root: Path, im_stride: int = 8):
+        if not isinstance(im_stride, int) or im_stride < 1:
+            raise ValueError("im_stride must be a positive integer")
         image_folder_name = "images"
         if im_stride > 1:
             image_folder_name += f"_{im_stride}"
         self.image_folder = data_root / image_folder_name
+        resize_stride = 1
+        if im_stride > 1 and not self.image_folder.is_dir():
+            self.image_folder = data_root / "images"
+            resize_stride = im_stride
         colmap_root = data_root / "sparse" / "0"
         reconstruction = Reconstruction.from_binary(colmap_root)
         cameras = reconstruction.cameras
@@ -101,7 +114,9 @@ class Dataset:
         colmap_images = list(reconstruction.images.values())
         self.frames = []
         for im in tqdm(colmap_images, desc="cache images"):
-            frame = ImageFrame.from_colmap_image(self.image_folder, im)
+            frame = ImageFrame.from_colmap_image(
+                self.image_folder, im, im_stride=resize_stride
+            )
             cam_id = im.camera_id
             K = intrinsic_dict[cam_id].clone()
             # Use actual image dimensions: downsampling can round width/height.

@@ -29,7 +29,10 @@ from the repository root:
 python demo/train_3dgs.py --data-root /path/to/scene --im-stride 1
 ```
 
-Use `--im-stride 8` if your scene provides downsampled images in `images_8/`.
+With `--im-stride 8`, the loader prefers downsampled images in `images_8/`.
+If that directory is missing, it loads `images/` and resizes each image while
+caching it in memory. Intrinsics are scaled to the actual output dimensions;
+no downsampled files are written to disk. This applies to all training demos.
 The default backend is original 3DGS; `--rasterizer-type aaa` selects AAA and
 `--rasterizer-type geer` selects GEER. The trained Gaussians are saved to
 `splat.ply` by default; change `--ply-save-path` to choose another output path.
