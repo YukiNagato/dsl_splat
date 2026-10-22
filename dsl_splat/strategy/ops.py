@@ -3,10 +3,9 @@
 # Upstream commit: 4d3a3b69db4de0326f983ccf7b7b255271a17b01.
 # Modified for DSL Splat: selected helpers/imports removed and the optimizer
 # helper renamed; opacity resets optionally account for a 3D Gaussian filter.
-# This local adaptation is in progress.
+# Incomplete MCMC relocation moved to mcmc_ops.py and implemented with Warp.
 # See README.md and LICENSE in this directory for source and license details.
 
-import numpy as np
 from typing import Callable, Dict, List, Union
 
 import torch
@@ -250,59 +249,3 @@ def reset_opa(
     update_param_with_optimizer(
         param_fn, optimizer_fn, params, optimizers, names=["opacities"]
     )
-
-
-@torch.no_grad()
-def relocate(
-    params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
-    optimizers: Dict[str, torch.optim.Optimizer],
-    state: Dict[str, Tensor],
-    mask: Tensor,
-    binoms: Tensor,
-    min_opacity: float = 0.005,
-):
-    """Inplace relocate some dead Gaussians to the lives ones.
-
-    Args:
-        params: A dictionary of parameters.
-        optimizers: A dictionary of optimizers, each corresponding to a parameter.
-        mask: A boolean mask to indicates which Gaussians are dead.
-    """
-    # support "opacities" with shape [N,] or [N, 1]
-    opacities = torch.sigmoid(params["opacities"])
-
-    dead_indices = mask.nonzero(as_tuple=True)[0]
-    alive_indices = (~mask).nonzero(as_tuple=True)[0]
-    n = len(dead_indices)
-
-    # Sample for new GSs
-    eps = torch.finfo(torch.float32).eps
-    probs = opacities[alive_indices].flatten()  # ensure its shape is [N,]
-    sampled_idxs = _multinomial_sample(probs, n, replacement=True)
-    sampled_idxs = alive_indices[sampled_idxs]
-    new_opacities, new_scales = compute_relocation(
-        opacities=opacities[sampled_idxs],
-        scales=torch.exp(params["scales"])[sampled_idxs],
-        ratios=torch.bincount(sampled_idxs)[sampled_idxs] + 1,
-        binoms=binoms,
-    )
-    new_opacities = torch.clamp(new_opacities, max=1.0 - eps, min=min_opacity)
-
-    def param_fn(name: str, p: Tensor) -> Tensor:
-        if name == "opacities":
-            p[sampled_idxs] = torch.logit(new_opacities)
-        elif name == "scales":
-            p[sampled_idxs] = torch.log(new_scales)
-        p[dead_indices] = p[sampled_idxs]
-        return torch.nn.Parameter(p)
-
-    def optimizer_fn(key: str, v: Tensor) -> Tensor:
-        v[sampled_idxs] = 0
-        return v
-
-    # update the parameters and the state in the optimizers
-    update_param_with_optimizer(param_fn, optimizer_fn, params, optimizers)
-    # update the extra running state
-    for k, v in state.items():
-        if isinstance(v, torch.Tensor):
-            v[sampled_idxs] = 0

@@ -43,6 +43,15 @@ See the script's `Config` dataclass and `--help` for command-line options:
 python demo/train_3dgs.py --help
 ```
 
+## MCMC strategy
+
+`train_3dgs.py` can use the renderer-independent Warp MCMC strategy:
+
+```bash
+python -m demo.train_3dgs --data-root /path/to/scene --im-stride 8 \
+    --strategy-type mcmc --max-gs-num 1000000 --refine-stop-iter 25000
+```
+
 ## PGSR-style training
 
 [train_pgsr.py](train_pgsr.py) adds plane flattening, single-view normal

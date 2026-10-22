@@ -49,4 +49,5 @@ files = [
     "dsl_splat/rade/types.py", "dsl_splat/rade/ops.py", "dsl_splat/rade/gsplat.py",
     "dsl_splat/rade/filtering.py", "dsl_splat/splatting/cameras.py",
     "dsl_splat/geer/api.py", "dsl_splat/geer/ops.py", "dsl_splat/geer/gsplat.py",
+    "dsl_splat/strategy/mcmc.py", "dsl_splat/strategy/mcmc_ops.py",
 ]

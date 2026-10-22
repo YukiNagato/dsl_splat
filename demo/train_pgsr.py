@@ -12,12 +12,10 @@ from pathlib import Path
 import random
 from typing import Any, Callable, Literal
 
-import torch
 from torch import Tensor
 from tqdm import tqdm
 import tyro
 
-from dsl_splat.strategy.default import DefaultStrategy
 from dsl_splat.pgsr import (
     MultiViewLoss,
     plane_features,
@@ -28,7 +26,6 @@ from dsl_splat.pgsr import (
     single_view_loss,
 )
 from dsl_splat.pgsr.geometry import MIN_DEPTH
-from dsl_splat.metrics import fused_ssim
 
 if __package__:
     from .colmap_dataset import ImageFrame
@@ -38,7 +35,14 @@ if __package__:
         save_debug_image,
     )
     from .model import GaussianContainer
-    from .utils import IndexRandomChooser, MovingAverager, psnr, set_random_seed
+    from .training import (
+        Trainer,
+        TrainConfig,
+        compile_geometry,
+        load_rasterizer,
+        photometric_loss,
+    )
+    from .utils import set_random_seed
 else:
     from colmap_dataset import ImageFrame
     from multiview import (
@@ -47,49 +51,22 @@ else:
         save_debug_image,
     )
     from model import GaussianContainer
-    from utils import IndexRandomChooser, MovingAverager, psnr, set_random_seed
+    from training import (
+        Trainer,
+        TrainConfig,
+        compile_geometry,
+        load_rasterizer,
+        photometric_loss,
+    )
+    from utils import set_random_seed
 
 
 @dataclass
-class Config:
+class Config(TrainConfig):
     # Data/model parameters.
-    data_root: Path = Path("data")
     debug_save_path: Path | None = None
-    im_stride: int = 8
-    ply_save_path: Path = Path("splat.ply")
-    sh_degree: int = 3
-    sh_degree_interval: int = 2000
-    random_gs_num: int = 50000
     rasterizer_type: Literal["3dgs", "aaa", "geer"] = "3dgs"
-
-    # Densification parameters.
-    max_gs_num: int | None = None
-    # None estimates the scene extent from camera centers; use 1.0 for the old behavior.
-    scene_scale: float | None = None
-
-    prune_opa: float = 0.05
-    prune_scale3d: float = 0.1  # Relative to scene_scale; inf disables size pruning.
     grow_grad2d: float = 0.0004
-    grow_scale3d: float = 0.01
-    refine_start_iter: int = 500
-    refine_stop_iter: int = 15000
-    reset_every: int = 5000
-    refine_every: int = 100
-    # Pause clone/split/prune after reset; "auto" uses len(dataset) + 100, None disables.
-    pause_refine_after_reset: int | Literal["auto"] | None = None
-
-    absgrad: bool = True
-
-    # Training parameters.
-    seed: int = 42
-    train_iters: int = 30000
-    means_lr: float = 1e-4
-    scales_lr: float = 0.01
-    quats_lr: float = 0.001
-    opacities_lr: float = 0.05
-    features_dc_lr: float = 0.0025
-    features_rest_lr: float = 0.0025 / 20
-    ssim_loss_factor: float = 0.2
 
     # PGSR parameters; the multi-view factor weights NCC and geometry separately.
     pgsr_compile: bool = True
@@ -123,12 +100,7 @@ def render_with_rasterizer(
     params = gaussian.gauss_params
     means, quats = params["means"], params["quats"]
     scales = params["scales"].exp()
-    colors = torch.cat((params["features_dc"][:, None], params["features_rest"]), dim=1)
-    if gaussian.sh_degree == 0:
-        colors = torch.sigmoid(colors[:, 0])
-        degree = None
-    else:
-        degree = gaussian.sh_degree if sh_degree_to_use is None else sh_degree_to_use
+    colors, degree = gaussian.appearance(sh_degree_to_use)
     # Dynamo specializes Parameter shapes even with dynamic=True. Tensor views
     # keep densification dynamic without copying storage or detaching gradients.
     extra = plane_features_fn(
@@ -160,7 +132,6 @@ def render_with_rasterizer(
 
 def main(cfg: Config) -> None:
     set_random_seed(cfg.seed)
-    device = torch.device("cuda")
     dataset = PGSRDataset(
         data_root=cfg.data_root,
         im_stride=cfg.im_stride,
@@ -169,79 +140,24 @@ def main(cfg: Config) -> None:
         multi_view_min_dis=cfg.pgsr_multi_view_min_dis,
         multi_view_max_dis=cfg.pgsr_multi_view_max_dis,
     )
-    if cfg.rasterizer_type == "3dgs":
-        from dsl_splat.gs3d.gsplat import rasterization
-    elif cfg.rasterizer_type == "aaa":
-        from dsl_splat.aaa.gsplat import rasterization
-    elif cfg.rasterizer_type == "geer":
-        from dsl_splat.geer.gsplat import rasterization
-    else:
-        raise ValueError(f"Invalid rasterizer type: {cfg.rasterizer_type}")
-
-    gaussian = GaussianContainer(
-        xyz=dataset.points_xyz,
-        rgb=dataset.points_rgb,
-        num_gs=cfg.random_gs_num,
-        sh_degree=cfg.sh_degree,
-    ).to(device)
-    chooser = IndexRandomChooser(len(dataset))
-    loss_average, psnr_average = MovingAverager(10), MovingAverager(10)
-    rates = {
-        "means": cfg.means_lr,
-        "scales": cfg.scales_lr,
-        "quats": cfg.quats_lr,
-        "opacities": cfg.opacities_lr,
-        "features_dc": cfg.features_dc_lr,
-        "features_rest": cfg.features_rest_lr,
-    }
-    optimizers = {
-        key: torch.optim.Adam([gaussian.gauss_params[key]], lr=rate)
-        for key, rate in rates.items()
-    }
-    strategy = DefaultStrategy(
-        max_gs_num=cfg.max_gs_num,
-        prune_opa=cfg.prune_opa,
-        prune_scale3d=cfg.prune_scale3d,
-        grow_grad2d=cfg.grow_grad2d,
-        grow_scale3d=cfg.grow_scale3d,
-        refine_start_iter=cfg.refine_start_iter,
-        refine_stop_iter=cfg.refine_stop_iter,
-        reset_every=cfg.reset_every,
-        refine_every=cfg.refine_every,
-        pause_refine_after_reset=(
-            len(dataset) + 100
-            if cfg.pause_refine_after_reset == "auto"
-            else cfg.pause_refine_after_reset
-        ),
-        absgrad=cfg.absgrad,
-        revised_opacity=False,
-        verbose=True,
-    )
-    strategy.check_sanity(gaussian.gauss_params, optimizers)
-    scene_scale = dataset.scene_scale if cfg.scene_scale is None else cfg.scene_scale
-    state = strategy.initialize_state(scene_scale=scene_scale)
-
-    # Compile only dense tensor blocks; Warp dispatch and dynamic selection stay eager.
-    def compile_geometry(function: Callable) -> Callable:
-        if not cfg.pgsr_compile:
-            return function
-        return torch.compile(function, fullgraph=True, dynamic=True)
-
-    feature_fn = compile_geometry(plane_features)
-    maps_fn = compile_geometry(plane_maps)
+    rasterization = load_rasterizer(cfg.rasterizer_type)
+    trainer = Trainer(cfg, dataset)
+    gaussian, device = trainer.gaussian, trainer.device
+    feature_fn = compile_geometry(plane_features, cfg.pgsr_compile)
+    maps_fn = compile_geometry(plane_maps, cfg.pgsr_compile)
     multi_view = MultiViewLoss(
         cfg.pgsr_multi_view_pixel_noise_th,
         cfg.pgsr_multi_view_sample_num,
         half_step=cfg.pgsr_multi_view_half_step,
-        geometry_fn=compile_geometry(multiview_geometry),
+        geometry_fn=compile_geometry(multiview_geometry, cfg.pgsr_compile),
     )
     for step in tqdm(range(cfg.train_iters), desc="train"):
-        debug_info = {} if cfg.debug_save_path is not None and step % 200 == 0 else None
-        for optimizer in optimizers.values():
-            optimizer.zero_grad(set_to_none=True)
-        data_idx = chooser()
-        frame = dataset[data_idx]
-        degree = min(step // cfg.sh_degree_interval, cfg.sh_degree)
+        debug_info: dict[str, Tensor] | None = (
+            {} if cfg.debug_save_path is not None and step % 200 == 0 else None
+        )
+        trainer.zero_grad()
+        data_idx, frame = trainer.sample_frame()
+        degree = trainer.sh_degree(step)
 
         def render_frame(camera: ImageFrame):
             return render_with_rasterizer(
@@ -258,12 +174,9 @@ def main(cfg: Config) -> None:
             )
 
         render, alpha, info = render_frame(frame)
-        strategy.step_pre_backward(gaussian.gauss_params, optimizers, state, step, info)
+        trainer.pre_backward(step, info)
         rgb, gt = render[0, ..., :3], frame.image.to(device)
-        l1 = torch.abs(gt - rgb).mean()
-        ssim_loss = 1 - fused_ssim(rgb, gt)
-        main_loss = cfg.ssim_loss_factor * ssim_loss + (1 - cfg.ssim_loss_factor) * l1
-        losses = {"main_loss": main_loss}
+        losses = {"main_loss": photometric_loss(rgb, gt, cfg.ssim_loss_factor)}
         visible = (info["radii"][0] > 0).all(dim=-1)
         if visible.any():
             losses["flatten_loss"] = cfg.pgsr_flatten_loss_factor * flatten_loss(
@@ -303,26 +216,8 @@ def main(cfg: Config) -> None:
                 geometry_weights=debug_info.get("geometry_weights"),
             )
         loss = sum(losses.values())
-        loss.backward()
-        for optimizer in optimizers.values():
-            optimizer.step()
-        strategy.step_post_backward(
-            params=gaussian.gauss_params,
-            optimizers=optimizers,
-            state=state,
-            step=step,
-            info=info,
-            packed=False,
-        )
-        average_loss = loss_average(loss.detach().item())
-        average_psnr = psnr_average(psnr(rgb, gt).item())
-        if step % 100 == 0:
-            details = ", ".join(
-                f"{key}={value.detach().item():.6f}" for key, value in losses.items()
-            )
-            tqdm.write(
-                f"step {step}, psnr {average_psnr:.4f}, {details}, ave_total_loss={average_loss:.6f}"
-            )
+        trainer.backward_and_step(step, loss, info)
+        trainer.log(step, loss, rgb, gt, losses=losses)
     gaussian.save_ply(cfg.ply_save_path)
 
 

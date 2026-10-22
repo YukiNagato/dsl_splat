@@ -84,6 +84,16 @@ class GaussianContainer(nn.Module):
             }
         )
 
+    def appearance(self, degree: int | None = None) -> tuple[torch.Tensor, int | None]:
+        """Return direct RGB for SH0 mode, or SH coefficients and active degree."""
+        params = self.gauss_params
+        if self.sh_degree == 0:
+            return params["features_dc"].sigmoid(), None
+        coefficients = torch.cat(
+            (params["features_dc"][:, None], params["features_rest"]), dim=1
+        )
+        return coefficients, self.sh_degree if degree is None else degree
+
     @torch.no_grad()
     def save_ply(
         self, path: str, *, extra_attributes: dict[str, torch.Tensor] | None = None

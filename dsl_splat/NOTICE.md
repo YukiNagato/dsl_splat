@@ -30,6 +30,9 @@ The gsplat-derived files in `strategy/` are copied or adapted from
 [gsplat v1.4.0](https://github.com/nerfstudio-project/gsplat/tree/v1.4.0/gsplat/strategy),
 commit `4d3a3b69db4de0326f983ccf7b7b255271a17b01`, by the gsplat authors and
 contributors. These files retain their upstream Apache License 2.0 terms.
+The MCMC strategy also implements gsplat's Equation 9 relocation and
+covariance-weighted position noise in Warp; its newer clamp convention and
+other adaptations are recorded in the strategy source notice.
 The component's full license is included in [strategy/LICENSE](strategy/LICENSE);
 [strategy/README.md](strategy/README.md) records the source files and local
 adaptations. This component-specific license does not replace the renderer
