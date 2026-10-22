@@ -48,7 +48,9 @@ class Rasterize(torch.autograd.Function):
         if background is not None:
             packed_background[:channels] = background
         background = packed_background
-        bins = bin_and_sort(state, config.width, config.height, bindings)
+        bins = bin_and_sort(
+            state, config.width, config.height, bindings, tile_mode=config.tile_mode
+        )
         output = render.render(
             state,
             bins,

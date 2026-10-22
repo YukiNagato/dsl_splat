@@ -4,7 +4,7 @@ The complete API keeps its fused Function. These independent Functions serve
 callers who explicitly reuse geometry or compose rendering stages.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Sequence
 
 import torch
@@ -20,6 +20,7 @@ from ..cameras import PinholeCamera
 from ..inputs import check_tensor, spherical_harmonics
 from ..primitives.tiling import TileBins
 from ..runtime.dispatch import FrameBindings
+from ..splatting.intersections import TileMode, validate_tile_mode
 from ..statistics import PreparedStatistics, StatisticsRequest, prepare_statistics
 
 
@@ -219,6 +220,7 @@ def prepare_gaussians(
     camera: PinholeCamera,
     *,
     radius_clip: float = 0.0,
+    tile_mode: TileMode = "radius",
 ) -> GaussianGeometry:
     if (
         not isinstance(means, Tensor)
@@ -227,6 +229,7 @@ def prepare_gaussians(
         or means.shape[1] != 3
     ):
         raise ValueError("means must be CUDA float32 (N,3)")
+    validate_tile_mode(tile_mode)
     n, device = len(means), means.device
     for name, value, shape in (
         ("means", means, (n, 3)),
@@ -240,6 +243,7 @@ def prepare_gaussians(
     )
     if view.device != device:
         raise ValueError("camera and Gaussians must use the same CUDA device")
+    config = replace(config, tile_mode=tile_mode)
     output = _Project.apply(
         means.contiguous(),
         normalize(quats, dim=-1).contiguous(),
@@ -261,6 +265,7 @@ def bin_and_sort(geometry: GaussianGeometry) -> GaussianTiles:
         geometry._config.width,
         geometry._config.height,
         FrameBindings(launch_cache),
+        tile_mode=geometry._config.tile_mode,
     )
     return GaussianTiles(bins["ranges"], bins["point_list"], geometry)
 

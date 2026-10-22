@@ -18,6 +18,7 @@ import warp as wp
 from .math import point_row, reference_matmul, reference_rotation
 from ..runtime.dispatch import FrameBindings, kernel_arg, launch
 from ..runtime.interop import current_stream
+from ..splatting.intersections import TilePairs, make_intersector
 
 from ..splatting.geometry import (
     ProjectedFootprint,
@@ -85,62 +86,85 @@ def screen_covariance(
     return wp.vec3(projected[0, 0] + 0.3, projected[1, 0], projected[1, 1] + 0.3)
 
 
-@wp.kernel(enable_backward=False)
-def project(
-    means: wp.array(dtype=wp.vec3),
-    quats: wp.array(dtype=wp.vec4),
-    scales: wp.array(dtype=wp.vec3),
-    opacities: wp.array(dtype=float),
-    view: wp.array2d(dtype=float),
-    projection: wp.array2d(dtype=float),
-    intrinsics: wp.array2d(dtype=float),
-    width: int,
-    height: int,
-    near: float,
-    far: float,
-    radius_clip: float,
-    centers: wp.array(dtype=wp.vec2),
-    conics: wp.array(dtype=wp.vec4),
-    radii: wp.array(dtype=int),
-    tiles: wp.array(dtype=int),
-    depths: wp.array(dtype=float),
-):
-    i = wp.tid()
-    radii[i] = 0
-    tiles[i] = 0
-    camera = load_matrix(view)
-    t4 = transform_point(means[i], camera)
-    if t4[2] <= near or t4[2] >= far:
-        return
-    covariance = screen_covariance(
-        t4,
-        quats[i],
-        scales[i],
-        camera,
-        width,
-        height,
-        intrinsics[0, 0],
-        intrinsics[1, 1],
-    )
-    a, b, c = covariance[0], covariance[1], covariance[2]
-    det = a * c - b * b
-    if det == 0.0:
-        return
-    mid = 0.5 * (a + c)
-    radius = int(wp.ceil(3.0 * wp.sqrt(mid + wp.sqrt(wp.max(0.1, mid * mid - det)))))
-    if float(radius) <= radius_clip:
-        return
-    center = pixel_center(means[i], load_matrix(projection), width, height)
-    bounds = tile_bounds(center, radius, (width + 15) // 16, (height + 15) // 16)
-    count = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1])
-    if count == 0:
-        return
-    inverse = invert_covariance(wp.vec3(a, b, c))
-    centers[i] = center
-    conics[i] = wp.vec4(inverse[0], inverse[1], inverse[2], opacities[i])
-    radii[i] = radius
-    tiles[i] = count
-    depths[i] = t4[2]
+@cache
+def _make_project(tile_mode):
+    intersect = make_intersector(tile_mode)
+
+    @wp.kernel(module="unique", enable_backward=False)
+    def project(
+        means: wp.array(dtype=wp.vec3),
+        quats: wp.array(dtype=wp.vec4),
+        scales: wp.array(dtype=wp.vec3),
+        opacities: wp.array(dtype=float),
+        view: wp.array2d(dtype=float),
+        projection: wp.array2d(dtype=float),
+        intrinsics: wp.array2d(dtype=float),
+        width: int,
+        height: int,
+        near: float,
+        far: float,
+        radius_clip: float,
+        centers: wp.array(dtype=wp.vec2),
+        conics: wp.array(dtype=wp.vec4),
+        radii: wp.array(dtype=int),
+        tiles: wp.array(dtype=int),
+        depths: wp.array(dtype=float),
+    ):
+        i = wp.tid()
+        radii[i] = 0
+        tiles[i] = 0
+        camera = load_matrix(view)
+        t4 = transform_point(means[i], camera)
+        if t4[2] <= near or t4[2] >= far:
+            return
+        covariance = screen_covariance(
+            t4,
+            quats[i],
+            scales[i],
+            camera,
+            width,
+            height,
+            intrinsics[0, 0],
+            intrinsics[1, 1],
+        )
+        a, b, c = covariance[0], covariance[1], covariance[2]
+        det = a * c - b * b
+        if det == 0.0:
+            return
+        mid = 0.5 * (a + c)
+        radius = int(
+            wp.ceil(3.0 * wp.sqrt(mid + wp.sqrt(wp.max(0.1, mid * mid - det))))
+        )
+        if float(radius) <= radius_clip:
+            return
+        center = pixel_center(means[i], load_matrix(projection), width, height)
+        bounds = tile_bounds(center, radius, (width + 15) // 16, (height + 15) // 16)
+        count = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1])
+        if count == 0:
+            return
+        inverse = invert_covariance(wp.vec3(a, b, c))
+        centers[i] = center
+        conics[i] = wp.vec4(inverse[0], inverse[1], inverse[2], opacities[i])
+        radii[i] = radius
+        tiles[i] = count
+        if wp.static(tile_mode != "radius"):
+            tiles[i] = intersect(
+                center,
+                conics[i],
+                radius,
+                (width + 15) // 16,
+                (height + 15) // 16,
+                i,
+                t4[2],
+                0,
+                TilePairs(),
+            )
+        depths[i] = t4[2]
+
+    return project
+
+
+project = _make_project("radius")
 
 
 @wp.struct
@@ -305,7 +329,7 @@ def prepare(
     )
     if n:
         launch(
-            project,
+            _make_project(config.tile_mode),
             dim=n,
             inputs=_input_arguments(
                 means, quats, scales, opacities, view, projection, intrinsics, bindings

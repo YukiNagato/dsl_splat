@@ -17,6 +17,7 @@ from ..cameras import validate_camera_options
 from ..inputs import batch_item, normalize_inputs
 from ..primitives.spherical_harmonics import spherical_harmonics
 from ..runtime.dispatch import FrameBindings
+from ..splatting.intersections import TileMode, validate_tile_mode
 from ..statistics import StatisticsRequest, prepare_statistics
 from ..training import prepare_training_metadata
 
@@ -64,8 +65,9 @@ def rasterize(
     packed: bool = False,
     absgrad: bool = False,
     statistics: Sequence[StatisticsRequest] = (),
+    tile_mode: TileMode = "radius",
 ) -> RasterizationResult:
-    """Render original 3DGS: projected conics, square bounds and center-Z sorting.
+    """Render original 3DGS with center-Z sorting and selectable tile bounds.
 
     Scales/opacities are activated; wxyz quaternions are normalized. Gaussian
     batch dimensions and per-view features/SH follow the documented layouts.
@@ -76,8 +78,12 @@ def rasterize(
     The default center-depth cutoff z>0.2 matches original CUDA. Explicit near
     and far values control this kernel's center clipping, independently of AAA.
     The reference's 0.3 covariance dilation and backward conventions are fixed.
+    tile_mode selects legacy radius squares, SnugBox opacity-aware rectangles
+    or AccuTile ellipse intersections. New modes retain original radii and
+    candidate limits, and conservatively account for float32 cutoff rounding.
     K/background gradients, depth output and higher derivatives are unsupported.
     """
+    validate_tile_mode(tile_mode)
     validate_camera_options(width, height, near_plane, far_plane, radius_clip)
     if (features is None) == (sh_coeffs is None):
         raise ValueError("provide exactly one of features or sh_coeffs")
@@ -129,7 +135,9 @@ def rasterize(
         batch_scales = layout.scales[b].contiguous()
         batch_opacities = layout.opacities[b].contiguous()
         for c in range(layout.cameras):
-            config = ViewConfig(width, height, near_plane, far_plane, radius_clip)
+            config = ViewConfig(
+                width, height, near_plane, far_plane, radius_clip, tile_mode
+            )
             bindings = FrameBindings(launch_cache)
             view = batch_item(batch_item(layout.viewmats, b), c).contiguous()
             projection = batch_item(batch_item(full, b), c)
@@ -201,6 +209,7 @@ def rasterize(
         with_eval3d=False,
         supports_means2d_grad=True,
         screen_gradient_mode="projected_mean",
+        tile_mode=tile_mode,
     )
     prepared_stats, statistics_outputs = (
         prepare_statistics(

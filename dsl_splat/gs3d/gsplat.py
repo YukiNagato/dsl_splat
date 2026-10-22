@@ -7,6 +7,7 @@ from typing import Any, Literal, Sequence
 from torch import Tensor
 
 from .api import rasterize
+from ..splatting.intersections import TileMode
 from ..inputs import RenderMode
 from ..statistics import StatisticsRequest
 
@@ -122,6 +123,7 @@ def rasterization(
     extra_signals: Tensor | None = None,
     extra_signals_sh_degree: int | None = None,
     statistics: Sequence[StatisticsRequest] = (),
+    tile_mode: TileMode = "radius",
 ) -> tuple[Tensor, Tensor, dict[str, Any]]:
     """Return (features, alpha, metadata) using the original-3DGS Warp pipeline.
 
@@ -185,6 +187,7 @@ def rasterization(
         packed=packed,
         absgrad=absgrad,
         statistics=statistics,
+        tile_mode=tile_mode,
     )
     if statistics:
         result.meta["statistics"] = result.statistics

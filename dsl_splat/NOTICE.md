@@ -61,6 +61,19 @@ Inria/MPII Gaussian-Splatting license is preserved in
 These component-specific notices do not replace the upstream license texts
 or relicense other components.
 
+## Speedy-Splat tile localization
+
+`splatting/intersections.py` adapts SnugBox and AccuTile from
+[Speedy-Splat](https://github.com/j-alex-hanson/speedy-splat), by Alex Hanson,
+Allen Tu, Geng Lin, Vasu Singla, Matthias Zwicker and Tom Goldstein.
+Reference: `speedy-splat-rasterizer`, revision
+`b38abb6da7a7217999f8c5ec0e9219284464ffe0`, `cuda_rasterizer/auxiliary.h`.
+The reference is derived from Inria/GRAPHDECO's rasterizer and retains the
+Gaussian-Splatting research-use license included in [LICENSE.md](LICENSE.md).
+This port uses Python/Warp, shares count/emission traversal, retains legacy
+3DGS candidate limits and radii, and conservatively expands the alpha cutoff
+for float32 rounding. It does not implement Speedy-Splat's pruning strategy.
+
 ## RaDe-GS
 
 The `rade/` renderer ports HKUST-SAIL's RaDe-GS CUDA rasterizer to Warp.

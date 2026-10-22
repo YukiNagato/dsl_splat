@@ -21,6 +21,7 @@ dsl_splat = ["py.typed", "*.md", "STOPTHEPOP_LICENSE.txt"]
 "dsl_splat.metrics" = ["*.md", "*_LICENSE.txt"]
 "dsl_splat.geer" = ["*.md", "*_LICENSE.txt"]
 "dsl_splat.rade" = ["*.md", "*_LICENSE.txt"]
+"dsl_splat.gs3d" = ["*.md"]
 
 [tool.black]
 target-version = ["py310"]
