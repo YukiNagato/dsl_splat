@@ -95,9 +95,23 @@ The helper uses `sqrt(scales**2 + filter_3d**2)` and the determinant opacity
 compensation, with ordinary PyTorch autograd. The caller computes filter widths
 from training cameras, refreshes them after densification and applies the
 matching opacity-reset policy. The renderer does not own training-camera state
-or silently substitute GEER's fixed filter. A full RaDe training pipeline,
+or silently substitute GEER's fixed filter. A full upstream RaDe training pipeline,
 integration/mesh extraction, sparse gradients, intrinsic/background gradients,
-contribution statistics, distortion and higher derivatives are not implemented.
+distortion and higher derivatives are not implemented.
+
+## Contribution statistics
+
+The full API, gsplat adapter and `ops.rasterize_to_pixels` support
+`MaskedContributionCount` and `WeightedContributionSum` from
+`dsl_splat.statistics`. Only accepted alpha blends contribute, using
+`pixel_weight * alpha * transmittance` for weighted sums. Statistics do not
+change rendering or participate in backward; omitting requests selects a
+kernel with no statistics arguments or atomics. Full-API results live in
+`result.statistics`, adapter results in `info["statistics"]`. Scores are dense
+`(...,C,N)` even when training metadata is packed; low-level results are `[N]`.
+
+The [training demo](../../demo/README.md#improved-gs-training) supports both its
+filter-aware default strategy and Improved-GS EAS/LAS/RAP/MU/growth control.
 
 ## Reference conventions
 

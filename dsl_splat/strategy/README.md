@@ -13,12 +13,12 @@ authors and contributors credited in its
 
 | Local file | Upstream source | Local changes |
 | --- | --- | --- |
-| `base.py` | [`gsplat/strategy/base.py`](https://github.com/nerfstudio-project/gsplat/blob/4d3a3b69db4de0326f983ccf7b7b255271a17b01/gsplat/strategy/base.py) | Body unchanged; final newline differs. |
+| `base.py` | [`gsplat/strategy/base.py`](https://github.com/nerfstudio-project/gsplat/blob/4d3a3b69db4de0326f983ccf7b7b255271a17b01/gsplat/strategy/base.py) | Strategy body unchanged; adds shared parameter/optimizer type aliases. |
 | `default.py` | [`gsplat/strategy/default.py`](https://github.com/nerfstudio-project/gsplat/blob/4d3a3b69db4de0326f983ccf7b7b255271a17b01/gsplat/strategy/default.py) | Adds an optional `max_gs_num` growth limit with joint random sampling of duplicate/split candidates. Uses GEER's canonical gradient proxy without projected-mean screen scaling and passes renderer filter metadata to opacity resets. Accepts `None` to disable the post-reset refinement pause and tracks actual opacity resets to define its window. Provides a post-growth reset-policy hook for methods with per-Gaussian filters. |
 | `ops.py` | [`gsplat/strategy/ops.py`](https://github.com/nerfstudio-project/gsplat/blob/4d3a3b69db4de0326f983ccf7b7b255271a17b01/gsplat/strategy/ops.py) | Selected helpers/imports removed, optimizer helper renamed, opacity reset optionally accounts for a 3D filter's determinant ratio, with scalar or per-Gaussian variance. MCMC operations now live in `mcmc_ops.py`. |
 | `mcmc.py` | [`gsplat/strategy/mcmc.py`](https://github.com/nerfstudio-project/gsplat/blob/4d3a3b69db4de0326f983ccf7b7b255271a17b01/gsplat/strategy/mcmc.py) | Same opacity-weighted relocation, 5% growth schedule and noise policy; uses Warp numerical operations. Adds validation, empty/all-dead handling and an optional noise cutoff. |
 | `mcmc_ops.py`, `_mcmc_kernels.py` | [`gsplat/strategy/ops.py`](https://github.com/nerfstudio-project/gsplat/blob/4d3a3b69db4de0326f983ccf7b7b255271a17b01/gsplat/strategy/ops.py), [`gsplat/relocation.py`](https://github.com/nerfstudio-project/gsplat/blob/4d3a3b69db4de0326f983ccf7b7b255271a17b01/gsplat/relocation.py) and Equation 9 of the MCMC paper | Python population management and native-free Warp relocation/noise kernels. Replaces the incomplete relocation helper previously in `ops.py`. Differences are documented below. |
-| `__init__.py` | Local exports | Exports `DefaultStrategy` and `MCMCStrategy`. |
+| `__init__.py` | Local exports | Exports `DefaultStrategy`, `MCMCStrategy` and `ImprovedGSStrategy`. |
 
 `DefaultStrategy` uses PyTorch. `MCMCStrategy` uses PyTorch for sampling and
 parameter/optimizer bookkeeping, and Warp for scale/opacity redistribution and
@@ -26,6 +26,12 @@ position noise. The latter fuses quaternion normalization, opacity gating and
 covariance application without allocating an `[N,3,3]` covariance tensor. It
 uses **covariance times noise**, following upstream MCMC, rather than a
 covariance square root.
+
+`ImprovedGSStrategy` implements EAS/LAS/RAP/MU and growth control, with a Warp
+LAS kernel and explicit externally collected inference scores. Its source,
+usage and separate upstream license are documented in
+[IMPROVED_GS.md](IMPROVED_GS.md). The gsplat-derived files listed above retain
+Apache-2.0; Improved-GS-derived files retain their own upstream terms.
 
 ## MCMC usage
 

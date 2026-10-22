@@ -21,7 +21,7 @@ from ..splatting.cameras import prepare_camera
 from ..cameras import PinholeCamera
 from ..inputs import check_tensor, spherical_harmonics
 from ..runtime.dispatch import FrameBindings
-from ..statistics import StatisticsRequest
+from ..statistics import PreparedStatistics, StatisticsRequest, prepare_statistics
 
 
 @dataclass(slots=True)
@@ -177,6 +177,7 @@ class _Pixels(torch.autograd.Function):
         geometry: GaussianGeometry,
         tiles: GaussianTiles,
         background: Tensor,
+        statistics: PreparedStatistics | None,
         grad_enabled: bool,
     ) -> tuple[Tensor, ...]:
         state = geometry._state()
@@ -190,6 +191,7 @@ class _Pixels(torch.autograd.Function):
             config.width,
             config.height,
             FrameBindings(launch_cache),
+            statistics,
         )
         if grad_enabled and any(ctx.needs_input_grad[:5]):
             ctx.save_for_backward(
@@ -211,7 +213,7 @@ class _Pixels(torch.autograd.Function):
     @once_differentiable
     def backward(ctx: Any, *gradients: Tensor | None) -> tuple[Tensor | None, ...]:
         if all(g is None for g in gradients):
-            return (None,) * 9
+            return (None,) * 10
         (
             centers,
             conics,
@@ -237,7 +239,7 @@ class _Pixels(torch.autograd.Function):
             config.height,
             FrameBindings(launch_cache),
         )
-        return gc, gq, gp, gn, gf, None, None, None, None
+        return gc, gq, gp, gn, gf, None, None, None, None, None
 
 
 def prepare_gaussians(
@@ -329,8 +331,20 @@ def rasterize_to_pixels(
         check_tensor("background", background, device, (channels,))
         if torch.is_grad_enabled() and background.requires_grad:
             raise NotImplementedError("background gradients are not supported")
-    if statistics:
-        raise NotImplementedError("RaDe-GS contribution statistics are not implemented")
+    prepared, outputs = (
+        prepare_statistics(
+            statistics,
+            batch_dims=(),
+            batch_count=1,
+            cameras=1,
+            n=n,
+            width=geometry._config.width,
+            height=geometry._config.height,
+            device=device,
+        )
+        if statistics
+        else ([], {})
+    )
     bg = features.new_zeros(channels) if background is None else background
     images = _Pixels.apply(
         geometry.centers,
@@ -341,9 +355,18 @@ def rasterize_to_pixels(
         geometry,
         tiles,
         bg,
+        prepared[0] if prepared else None,
         torch.is_grad_enabled(),
     )
-    return PixelResult(*images)
+    features_image, alpha, depth, median, normals = images
+    return PixelResult(
+        features_image,
+        alpha,
+        depth,
+        median,
+        normals,
+        {name: value[0] for name, value in outputs.items()},
+    )
 
 
 __all__ = [

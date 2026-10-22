@@ -53,6 +53,11 @@ its interface; rendering and gradients come from the selected method
 implementation. Supported options and numerical behavior depend
 on the method. The gsplat package is not required for rendering.
 
+[`dsl_splat.strategy`](dsl_splat/strategy/README.md) includes Default, MCMC and
+Improved-GS strategies. Improved-GS implements EAS/LAS/RAP/MU and growth control,
+with Warp LAS geometry and externally collected inference scores.
+The training demos can also combine Improved-GS with PGSR or RaDe-GS.
+
 ## Installation
 
 Use **Python 3.10+** and an NVIDIA GPU. First install a CUDA-enabled PyTorch

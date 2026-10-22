@@ -11,6 +11,7 @@ from ..splatting.binning import bin_and_sort
 from .types import ViewConfig
 from ..runtime.dispatch import FrameBindings, LaunchCache
 from ..runtime.gradients import AbsGradientTarget
+from ..statistics import PreparedStatistics
 
 
 class Rasterize(torch.autograd.Function):
@@ -32,6 +33,7 @@ class Rasterize(torch.autograd.Function):
         config: ViewConfig,
         bindings: FrameBindings,
         absolute: AbsGradientTarget | None,
+        statistics: PreparedStatistics | None,
         grad_enabled: bool,
     ) -> tuple[Tensor, ...]:
         # Attribute packing belongs to this first-order rendering operation.
@@ -61,6 +63,7 @@ class Rasterize(torch.autograd.Function):
             config.width,
             config.height,
             bindings,
+            statistics,
         )
         if grad_enabled and any(ctx.needs_input_grad[:10]):
             ctx.save_for_backward(
@@ -96,7 +99,7 @@ class Rasterize(torch.autograd.Function):
     @once_differentiable
     def backward(ctx: Any, *gradients: Tensor | None) -> tuple[Tensor | None, ...]:
         if all(g is None for g in gradients):
-            return (None,) * 16
+            return (None,) * 17
         (
             means,
             quats,
@@ -176,6 +179,7 @@ class Rasterize(torch.autograd.Function):
             *input_gradients[4:],
             None,
             grad_centers if ctx.needs_input_grad[9] else None,
+            None,
             None,
             None,
             None,

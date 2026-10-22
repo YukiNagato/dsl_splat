@@ -47,7 +47,15 @@ class PreparedStatistics:
 @cache
 def make_observer(key: StatisticsKey) -> wp.Function:
     """Compile the selected formulas into the renderer's accepted-blend path."""
-    rows = tuple(sum(other == kind for other in key[:i]) for i, kind in enumerate(key))
+    # Warp's cache hash sees captured Warp values, but not Python tuples indexed
+    # by an unrolled loop variable. Keep both kinds and row offsets as constants
+    # so count/sum variants cannot reuse each other's compiled GPU code.
+    Constant = wp.types.vector(max(1, len(key)), wp.int32)
+    kinds = Constant(*(key or (0,)))
+    offsets = tuple(
+        sum(other == kind for other in key[:i]) for i, kind in enumerate(key)
+    )
+    rows = Constant(*(offsets or (0,)))
 
     @wp.func
     def observe(context: DeviceStatistics, gaussian: int, pixel: int, weight: float):
@@ -55,7 +63,7 @@ def make_observer(key: StatisticsKey) -> wp.Function:
             i = wp.static(index)
             row = wp.static(rows[i])
             value = context.pixel_values[i, pixel]
-            if wp.static(key[i] == 0):
+            if wp.static(kinds[i] == 0):
                 if value != 0.0:
                     wp.atomic_add(context.counts, row, gaussian, 1)
             else:

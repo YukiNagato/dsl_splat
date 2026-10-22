@@ -1,18 +1,33 @@
-import torch
-from dsl_splat.strategy.mcmc import MCMCStrategy
-from dataclasses import dataclass
+"""3DGS/AAA/GEER training with Default, MCMC or Improved-GS strategies."""
+
+import math
+from dataclasses import dataclass, field
 from typing import Any, Literal, Callable
+
+import torch
 import tyro
 from tqdm import tqdm
+
+from dsl_splat.strategy import ImprovedGSStrategy, MCMCStrategy
 
 if __package__:
     from .colmap_dataset import Dataset
     from .model import GaussianContainer
+    from .improvedgs import (
+        ImprovedGSOptions,
+        ImprovedGSScorer,
+        improved_strategy_options,
+    )
     from .training import Trainer, TrainConfig, load_rasterizer, photometric_loss
     from .utils import set_random_seed
 else:
     from colmap_dataset import Dataset
     from model import GaussianContainer
+    from improvedgs import (
+        ImprovedGSOptions,
+        ImprovedGSScorer,
+        improved_strategy_options,
+    )
     from training import Trainer, TrainConfig, load_rasterizer, photometric_loss
     from utils import set_random_seed
 
@@ -20,7 +35,10 @@ else:
 @dataclass
 class Config(TrainConfig):
     rasterizer_type: Literal["3dgs", "aaa", "geer"] = "3dgs"
-    strategy_type: Literal["default", "mcmc"] = "default"
+    strategy_type: Literal["default", "mcmc", "improvedgs"] = "default"
+    improvedgs: ImprovedGSOptions = field(default_factory=ImprovedGSOptions)
+    # None keeps a constant position learning rate, as in the original demo.
+    means_lr_final: float | None = None
 
     # MCMC-only settings; max_gs_num defaults to 1M for this strategy.
     mcmc_noise_lr: float = 5e5
@@ -70,10 +88,24 @@ def render_with_rasterizer(
 
 
 def main(cfg: Config) -> None:
+    if cfg.strategy_type == "improvedgs" and cfg.rasterizer_type == "geer":
+        raise ValueError(
+            "Improved-GS EAS requires 3dgs or aaa; GEER has no contribution statistics"
+        )
+    if cfg.strategy_type == "improvedgs" and cfg.train_iters < 1:
+        raise ValueError("train_iters must be positive")
+    if cfg.means_lr_final is not None:
+        if any(
+            not math.isfinite(rate) or rate <= 0
+            for rate in (cfg.means_lr, cfg.means_lr_final)
+        ):
+            raise ValueError(
+                "decaying position learning rates must be positive and finite"
+            )
     set_random_seed(cfg.seed)
     dataset = Dataset(data_root=cfg.data_root, im_stride=cfg.im_stride)
     rasterization = load_rasterizer(cfg.rasterizer_type)
-    strategy = None
+    strategy: MCMCStrategy | ImprovedGSStrategy | None = None
     if cfg.strategy_type == "mcmc":
         strategy = MCMCStrategy(
             cap_max=1_000_000 if cfg.max_gs_num is None else cfg.max_gs_num,
@@ -85,12 +117,29 @@ def main(cfg: Config) -> None:
             refine_every=cfg.refine_every,
             verbose=True,
         )
+    elif cfg.strategy_type == "improvedgs":
+        strategy = ImprovedGSStrategy(
+            **improved_strategy_options(cfg.improvedgs, cfg, dataset)
+        )
     trainer = Trainer(cfg, dataset, strategy)
     gaussian, device = trainer.gaussian, trainer.device
+    scorer = (
+        ImprovedGSScorer.from_options(dataset, cfg.improvedgs)
+        if cfg.strategy_type == "improvedgs"
+        else None
+    )
 
-    for step in tqdm(range(cfg.train_iters), desc="train"):
-        trainer.zero_grad()
+    first_step = 1 if scorer is not None else 0
+    for step in tqdm(range(first_step, cfg.train_iters + first_step), desc="train"):
+        trainer.begin_step()
+        if cfg.means_lr_final is not None:
+            progress = (step - first_step) / max(cfg.train_iters - 1, 1)
+            trainer.optimizers["means"].param_groups[0]["lr"] = math.exp(
+                math.log(cfg.means_lr) * (1 - progress)
+                + math.log(cfg.means_lr_final) * progress
+            )
         _, frame = trainer.sample_frame()
+        degree = trainer.sh_degree(step)
 
         render, alpha, info = render_with_rasterizer(
             rasterization,
@@ -99,8 +148,10 @@ def main(cfg: Config) -> None:
             frame.w2c.to(device),
             frame.image.shape[0],
             frame.image.shape[1],
-            trainer.sh_degree(step),
-            absgrad=cfg.absgrad and cfg.strategy_type == "default",
+            degree,
+            absgrad=cfg.absgrad
+            and cfg.strategy_type != "mcmc"
+            and (scorer is None or step < cfg.refine_stop_iter),
         )
         trainer.pre_backward(step, info)
 
@@ -116,7 +167,17 @@ def main(cfg: Config) -> None:
                 * gaussian.gauss_params["opacities"].sigmoid().mean()
                 + cfg.mcmc_scale_reg * gaussian.gauss_params["scales"].exp().mean()
             )
-        trainer.backward_and_step(step, loss, info)
+        trainer.backward_and_step(
+            step,
+            loss,
+            info,
+            score_fn=(
+                None
+                if scorer is None
+                else lambda: scorer(step, gaussian, rasterization, degree)
+            ),
+            final=step == cfg.train_iters,
+        )
         trainer.log(step, loss, rgb, gt)
 
     gaussian.save_ply(cfg.ply_save_path)

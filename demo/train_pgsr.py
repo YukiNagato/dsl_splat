@@ -7,7 +7,7 @@ with their principal points shifted by -0.5 to describe the same rays.
 This is a minimal training example, not a full reproduction of PGSR's trainer.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import random
 from typing import Any, Callable, Literal
@@ -26,6 +26,7 @@ from dsl_splat.pgsr import (
     single_view_loss,
 )
 from dsl_splat.pgsr.geometry import MIN_DEPTH
+from dsl_splat.strategy import ImprovedGSStrategy
 
 if __package__:
     from .colmap_dataset import ImageFrame
@@ -35,6 +36,11 @@ if __package__:
         save_debug_image,
     )
     from .model import GaussianContainer
+    from .improvedgs import (
+        ImprovedGSOptions,
+        ImprovedGSScorer,
+        improved_strategy_options,
+    )
     from .training import (
         Trainer,
         TrainConfig,
@@ -51,6 +57,11 @@ else:
         save_debug_image,
     )
     from model import GaussianContainer
+    from improvedgs import (
+        ImprovedGSOptions,
+        ImprovedGSScorer,
+        improved_strategy_options,
+    )
     from training import (
         Trainer,
         TrainConfig,
@@ -67,6 +78,8 @@ class Config(TrainConfig):
     debug_save_path: Path | None = None
     rasterizer_type: Literal["3dgs", "aaa", "geer"] = "3dgs"
     grow_grad2d: float = 0.0004
+    strategy_type: Literal["default", "improvedgs"] = "default"
+    improvedgs: ImprovedGSOptions = field(default_factory=ImprovedGSOptions)
 
     # PGSR parameters; the multi-view factor weights NCC and geometry separately.
     pgsr_compile: bool = True
@@ -131,6 +144,10 @@ def render_with_rasterizer(
 
 
 def main(cfg: Config) -> None:
+    if cfg.strategy_type == "improvedgs" and cfg.rasterizer_type == "geer":
+        raise ValueError(
+            "Improved-GS EAS requires 3dgs or aaa; GEER has no contribution statistics"
+        )
     set_random_seed(cfg.seed)
     dataset = PGSRDataset(
         data_root=cfg.data_root,
@@ -141,7 +158,17 @@ def main(cfg: Config) -> None:
         multi_view_max_dis=cfg.pgsr_multi_view_max_dis,
     )
     rasterization = load_rasterizer(cfg.rasterizer_type)
-    trainer = Trainer(cfg, dataset)
+    strategy = (
+        ImprovedGSStrategy(**improved_strategy_options(cfg.improvedgs, cfg, dataset))
+        if cfg.strategy_type == "improvedgs"
+        else None
+    )
+    trainer = Trainer(cfg, dataset, strategy)
+    scorer = (
+        ImprovedGSScorer.from_options(dataset, cfg.improvedgs)
+        if strategy is not None
+        else None
+    )
     gaussian, device = trainer.gaussian, trainer.device
     feature_fn = compile_geometry(plane_features, cfg.pgsr_compile)
     maps_fn = compile_geometry(plane_maps, cfg.pgsr_compile)
@@ -151,11 +178,12 @@ def main(cfg: Config) -> None:
         half_step=cfg.pgsr_multi_view_half_step,
         geometry_fn=compile_geometry(multiview_geometry, cfg.pgsr_compile),
     )
-    for step in tqdm(range(cfg.train_iters), desc="train"):
+    first_step = 1 if scorer is not None else 0
+    for step in tqdm(range(first_step, cfg.train_iters + first_step), desc="train"):
         debug_info: dict[str, Tensor] | None = (
             {} if cfg.debug_save_path is not None and step % 200 == 0 else None
         )
-        trainer.zero_grad()
+        trainer.begin_step()
         data_idx, frame = trainer.sample_frame()
         degree = trainer.sh_degree(step)
 
@@ -168,7 +196,7 @@ def main(cfg: Config) -> None:
                 camera.height,
                 camera.width,
                 degree,
-                absgrad=cfg.absgrad,
+                absgrad=cfg.absgrad and (scorer is None or step < cfg.refine_stop_iter),
                 plane_features_fn=feature_fn,
                 plane_maps_fn=maps_fn,
             )
@@ -216,7 +244,17 @@ def main(cfg: Config) -> None:
                 geometry_weights=debug_info.get("geometry_weights"),
             )
         loss = sum(losses.values())
-        trainer.backward_and_step(step, loss, info)
+        trainer.backward_and_step(
+            step,
+            loss,
+            info,
+            score_fn=(
+                None
+                if scorer is None
+                else lambda: scorer(step, gaussian, rasterization, degree)
+            ),
+            final=step == cfg.train_iters,
+        )
         trainer.log(step, loss, rgb, gt, losses=losses)
     gaussian.save_ply(cfg.ply_save_path)
 

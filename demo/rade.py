@@ -13,6 +13,7 @@ from dsl_splat.pgsr.geometry import (
     valid_depth,
 )
 from dsl_splat.strategy.default import DefaultStrategy
+from dsl_splat.strategy import ImprovedGSStrategy
 from dsl_splat.strategy.ops import reset_opa
 
 if __package__:
@@ -63,21 +64,13 @@ def compute_3d_filter(
     return (distance * (math.sqrt(0.2) / max_focal))[:, None]
 
 
-class RaDeStrategy(DefaultStrategy):
-    """Keep filter rows aligned through growth/pruning and reset filtered opacity."""
+class _RaDeFilter:
+    """Filtering shared by the default and Improved-GS population policies."""
 
-    def __init__(
-        self,
-        frames: Sequence[ImageFrame],
-        *,
-        filter_3d: bool = True,
-        near_plane: float = 0.2,
-        reset_opacity: float = 0.01,
-        **kwargs: Any,
-    ):
-        super().__init__(**kwargs)
-        self.frames, self.filter_enabled = frames, filter_3d
-        self.near_plane, self.reset_opacity = near_plane, reset_opacity
+    frames: Sequence[ImageFrame]
+    filter_enabled: bool
+    near_plane: float
+    reset_opacity: float
 
     @torch.no_grad()
     def refresh_filter(
@@ -90,18 +83,6 @@ class RaDeStrategy(DefaultStrategy):
             if self.filter_enabled
             else params["means"].new_zeros((len(params["means"]), 1))
         )
-
-    def _prune_gs(
-        self,
-        params: dict[str, torch.nn.Parameter] | torch.nn.ParameterDict,
-        optimizers: dict[str, torch.optim.Optimizer],
-        state: dict[str, Any],
-        step: int,
-    ) -> int:
-        removed = super()._prune_gs(params, optimizers, state, step)
-        # Called after growth; recompute even when a split leaves N unchanged.
-        self.refresh_filter(params, state)
-        return removed
 
     def _reset_opacities(
         self,
@@ -119,6 +100,64 @@ class RaDeStrategy(DefaultStrategy):
                 state["filter_3d"].square() if self.filter_enabled else None
             ),
         )
+
+
+class RaDeStrategy(_RaDeFilter, DefaultStrategy):
+    """Keep filter rows aligned through growth/pruning and reset filtered opacity."""
+
+    def __init__(
+        self,
+        frames: Sequence[ImageFrame],
+        *,
+        filter_3d: bool = True,
+        near_plane: float = 0.2,
+        reset_opacity: float = 0.01,
+        **kwargs: Any,
+    ):
+        super().__init__(**kwargs)
+        self.frames, self.filter_enabled = frames, filter_3d
+        self.near_plane, self.reset_opacity = near_plane, reset_opacity
+
+    def _prune_gs(
+        self,
+        params: dict[str, torch.nn.Parameter] | torch.nn.ParameterDict,
+        optimizers: dict[str, torch.optim.Optimizer],
+        state: dict[str, Any],
+        step: int,
+    ) -> int:
+        removed = super()._prune_gs(params, optimizers, state, step)
+        # Called after growth; recompute even when a split leaves N unchanged.
+        self.refresh_filter(params, state)
+        return removed
+
+
+class RaDeImprovedGSStrategy(_RaDeFilter, ImprovedGSStrategy):
+    """Apply LAS/RAP while preserving RaDe's camera-dependent filter/reset."""
+
+    def __init__(
+        self,
+        frames: Sequence[ImageFrame],
+        *,
+        filter_3d: bool = True,
+        near_plane: float = 0.2,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.frames, self.filter_enabled = frames, filter_3d
+        self.near_plane = near_plane
+
+    def _grow_with_scores(
+        self,
+        params: dict[str, torch.nn.Parameter] | torch.nn.ParameterDict,
+        optimizers: dict[str, torch.optim.Optimizer],
+        state: dict[str, Any],
+        step: int,
+        scores: Tensor | None,
+    ) -> int:
+        count = super()._grow_with_scores(params, optimizers, state, step, scores)
+        if count:
+            self.refresh_filter(params, state)
+        return count
 
 
 def geometry_maps(

@@ -38,6 +38,16 @@ The component's full license is included in [strategy/LICENSE](strategy/LICENSE)
 adaptations. This component-specific license does not replace the renderer
 license described above or relicense the rest of this package.
 
+## Improved-GS
+
+`strategy/improved_gs.py`, `improved_gs_ops.py` and `_improved_gs_kernels.py`
+adapt Improved-GS by Xiaobin Deng, Changyu Diao, Min Li, Ruohan Yu, Duanqing Xu
+and Zhejiang University. Sources, paper-era revision and local changes are
+recorded in [strategy/IMPROVED_GS.md](strategy/IMPROVED_GS.md); upstream terms
+are preserved in [strategy/IMPROVED_GS_LICENSE.txt](strategy/IMPROVED_GS_LICENSE.txt).
+Inherited gsplat strategy components retain Apache-2.0. The demo inference
+scorer adapts the same Improved-GS pipeline.
+
 ## PGSR plane supervision and RaDe-GS NCC
 
 The `pgsr/` geometry and loss helpers adapt PGSR and RaDe-GS. Their source

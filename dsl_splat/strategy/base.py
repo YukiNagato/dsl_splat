@@ -1,7 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# Derived from gsplat v1.4.0, strategy/base.py (gsplat contributors).
+# Modified for DSL Splat: shared parameter/optimizer type aliases.
 from dataclasses import dataclass
-from typing import Dict, Union
+from typing import Dict, Union, TypeAlias
+from collections.abc import Mapping
 
 import torch
+
+Params: TypeAlias = dict[str, torch.nn.Parameter] | torch.nn.ParameterDict
+Optimizers: TypeAlias = Mapping[str, torch.optim.Optimizer]
 
 
 @dataclass

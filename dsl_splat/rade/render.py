@@ -21,6 +21,12 @@ from ..primitives.warp import any_active, sum_vector_lanes
 from ..primitives.tiling import TileBins
 from ..runtime.dispatch import FrameBindings, kernel_arg, launch
 from ..runtime.interop import current_stream, contiguous_features
+from ..statistics import (
+    DeviceStatistics,
+    PreparedStatistics,
+    StatisticsKey,
+    make_observer,
+)
 
 
 @dataclass(slots=True)
@@ -91,17 +97,15 @@ def _shared_attributes(channels: int):
 
 
 @cache
-def _make_forward(channels: int) -> wp.Kernel:
+def _make_forward(channels: int, statistics_key: StatisticsKey = ()) -> wp.Kernel:
     Feature = wp.types.vector(channels, wp.float32)
     shared_features, shared_geometry, load_features = _shared_attributes(channels)
 
-    @wp.kernel(
-        module="unique",
-        enable_backward=False,
-        launch_bounds=256,
-        module_options={"max_unroll": 0, "fast_math": True},
-    )
-    def render(
+    observe = make_observer(statistics_key)
+
+    @wp.func
+    def evaluate(
+        tid: int,
         width: int,
         height: int,
         ranges: wp.array2d(dtype=int),
@@ -116,8 +120,8 @@ def _make_forward(channels: int) -> wp.Kernel:
         planes: wp.array(dtype=wp.vec3),
         normals: wp.array(dtype=wp.vec3),
         intrinsics: wp.array2d(dtype=float),
+        statistics: DeviceStatistics,
     ):
-        tid = wp.tid()
         tile, lane = tid // 256, tid % 256
         gx = (width + 15) // 16
         x, y = tile % gx * 16 + lane % 16, tile // gx * 16 + lane // 16
@@ -186,6 +190,8 @@ def _make_forward(channels: int) -> wp.Kernel:
                                 plane[0] * delta[0] + plane[1] * delta[1] + plane[2]
                             )
                             weight = alpha * transmittance
+                            if wp.static(len(statistics_key) > 0):
+                                observe(statistics, loaded_ids[j], pixel, weight)
                             depth += distance * weight
                             normal += loaded_geometry[256 + j] * weight
                             if transmittance > 0.5:
@@ -219,6 +225,99 @@ def _make_forward(channels: int) -> wp.Kernel:
             auxiliary[count + pixel] = length
             contributors[count + pixel] = median_contributor
             contributors[pixel] = last_contributor
+
+    if statistics_key:
+
+        @wp.kernel(
+            module="unique",
+            enable_backward=False,
+            launch_bounds=256,
+            module_options={"max_unroll": 0, "fast_math": True},
+        )
+        def render_statistics(
+            width: int,
+            height: int,
+            ranges: wp.array2d(dtype=int),
+            ids: wp.array(dtype=int),
+            centers: wp.array(dtype=wp.vec2),
+            conics: wp.array(dtype=wp.vec4),
+            features: wp.array(dtype=Feature),
+            background: wp.array(dtype=float),
+            image: wp.array(dtype=float),
+            auxiliary: wp.array(dtype=float),
+            contributors: wp.array(dtype=int),
+            planes: wp.array(dtype=wp.vec3),
+            normals: wp.array(dtype=wp.vec3),
+            intrinsics: wp.array2d(dtype=float),
+            pixel_values: wp.array2d(dtype=float),
+            counts: wp.array2d(dtype=int),
+            sums: wp.array2d(dtype=float),
+        ):
+            statistics = DeviceStatistics()
+            statistics.pixel_values = pixel_values
+            statistics.counts = counts
+            statistics.sums = sums
+            evaluate(
+                wp.tid(),
+                width,
+                height,
+                ranges,
+                ids,
+                centers,
+                conics,
+                features,
+                background,
+                image,
+                auxiliary,
+                contributors,
+                planes,
+                normals,
+                intrinsics,
+                statistics,
+            )
+
+        return render_statistics
+
+    @wp.kernel(
+        module="unique",
+        enable_backward=False,
+        launch_bounds=256,
+        module_options={"max_unroll": 0, "fast_math": True},
+    )
+    def render(
+        width: int,
+        height: int,
+        ranges: wp.array2d(dtype=int),
+        ids: wp.array(dtype=int),
+        centers: wp.array(dtype=wp.vec2),
+        conics: wp.array(dtype=wp.vec4),
+        features: wp.array(dtype=Feature),
+        background: wp.array(dtype=float),
+        image: wp.array(dtype=float),
+        auxiliary: wp.array(dtype=float),
+        contributors: wp.array(dtype=int),
+        planes: wp.array(dtype=wp.vec3),
+        normals: wp.array(dtype=wp.vec3),
+        intrinsics: wp.array2d(dtype=float),
+    ):
+        evaluate(
+            wp.tid(),
+            width,
+            height,
+            ranges,
+            ids,
+            centers,
+            conics,
+            features,
+            background,
+            image,
+            auxiliary,
+            contributors,
+            planes,
+            normals,
+            intrinsics,
+            DeviceStatistics(),
+        )
 
     return render
 
@@ -458,6 +557,7 @@ def render(
     width: int,
     height: int,
     bindings: FrameBindings,
+    statistics: PreparedStatistics | None = None,
 ) -> RenderedPixels:
     channels = features.shape[-1]
     result = RenderedPixels(
@@ -465,29 +565,35 @@ def render(
         features.new_empty((2, height, width)),
         torch.empty((2, height, width), dtype=torch.int32, device=features.device),
     )
+    arguments = [
+        width,
+        height,
+        kernel_arg(bins["ranges"], bindings=bindings),
+        kernel_arg(bins["point_list"], bindings=bindings),
+        kernel_arg(state.centers, wp.vec2, bindings),
+        kernel_arg(state.conics, wp.vec4, bindings),
+        kernel_arg(
+            contiguous_features(features),
+            wp.types.vector(channels, wp.float32),
+            bindings,
+        ),
+        kernel_arg(background, bindings=bindings),
+        kernel_arg(result.features.view(-1), bindings=bindings),
+        kernel_arg(result.auxiliary.view(-1), bindings=bindings),
+        kernel_arg(result.contributors.view(-1), bindings=bindings),
+        kernel_arg(state.ray_planes, wp.vec3, bindings),
+        kernel_arg(state.normals, wp.vec3, bindings),
+        kernel_arg(intrinsics, bindings=bindings),
+    ]
+    if statistics is not None:
+        arguments.extend(
+            kernel_arg(value, bindings=bindings)
+            for value in (statistics.pixel_values, statistics.counts, statistics.sums)
+        )
     launch(
-        _make_forward(channels),
+        _make_forward(channels, () if statistics is None else statistics.key),
         dim=256 * len(bins["ranges"]),
-        inputs=[
-            width,
-            height,
-            kernel_arg(bins["ranges"], bindings=bindings),
-            kernel_arg(bins["point_list"], bindings=bindings),
-            kernel_arg(state.centers, wp.vec2, bindings),
-            kernel_arg(state.conics, wp.vec4, bindings),
-            kernel_arg(
-                contiguous_features(features),
-                wp.types.vector(channels, wp.float32),
-                bindings,
-            ),
-            kernel_arg(background, bindings=bindings),
-            kernel_arg(result.features.view(-1), bindings=bindings),
-            kernel_arg(result.auxiliary.view(-1), bindings=bindings),
-            kernel_arg(result.contributors.view(-1), bindings=bindings),
-            kernel_arg(state.ray_planes, wp.vec3, bindings),
-            kernel_arg(state.normals, wp.vec3, bindings),
-            kernel_arg(intrinsics, bindings=bindings),
-        ],
+        inputs=arguments,
         outputs=[],
         stream=current_stream(features.device, bindings=bindings),
         bindings=bindings,

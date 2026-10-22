@@ -16,7 +16,7 @@ include = ["dsl_splat*"]
 
 [tool.setuptools.package-data]
 dsl_splat = ["py.typed", "*.md", "STOPTHEPOP_LICENSE.txt"]
-"dsl_splat.strategy" = ["LICENSE", "*.md"]
+"dsl_splat.strategy" = ["LICENSE", "*.md", "*_LICENSE.txt"]
 "dsl_splat.pgsr" = ["*.md", "*_LICENSE.txt"]
 "dsl_splat.metrics" = ["*.md", "*_LICENSE.txt"]
 "dsl_splat.geer" = ["*.md", "*_LICENSE.txt"]
@@ -50,4 +50,5 @@ files = [
     "dsl_splat/rade/filtering.py", "dsl_splat/splatting/cameras.py",
     "dsl_splat/geer/api.py", "dsl_splat/geer/ops.py", "dsl_splat/geer/gsplat.py",
     "dsl_splat/strategy/mcmc.py", "dsl_splat/strategy/mcmc_ops.py",
+    "dsl_splat/strategy/improved_gs.py", "dsl_splat/strategy/improved_gs_ops.py",
 ]

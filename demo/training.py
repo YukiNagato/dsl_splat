@@ -9,7 +9,7 @@ from torch import Tensor
 from tqdm import tqdm
 
 from dsl_splat.metrics import fused_ssim
-from dsl_splat.strategy import DefaultStrategy, MCMCStrategy
+from dsl_splat.strategy import DefaultStrategy, ImprovedGSStrategy, MCMCStrategy
 
 if __package__:
     from .colmap_dataset import Dataset, ImageFrame
@@ -117,6 +117,8 @@ class Trainer:
     loss, debug output and method-specific scheduling explicit. ``pre_backward``
     belongs after the main render, and ``backward_and_step`` after all losses
     have been built; optimizer updates always precede strategy refinement.
+    ``begin_step`` preserves incomplete MU batches. Improved-GS callers supply
+    an EAS ``score_fn`` and mark the final step to flush any remaining gradients.
     """
 
     def __init__(
@@ -173,22 +175,60 @@ class Trainer:
         for optimizer in self.optimizers.values():
             optimizer.zero_grad(set_to_none=True)
 
+    def begin_step(self) -> None:
+        """Ordinary steps clear gradients; Improved-GS MU keeps partial batches."""
+        if not isinstance(self.strategy, ImprovedGSStrategy):
+            self.zero_grad()
+
     def pre_backward(self, step: int, info: dict[str, Any]) -> None:
         self.strategy.step_pre_backward(
             self.gaussian.gauss_params, self.optimizers, self.state, step, info
         )
 
-    def backward_and_step(self, step: int, loss: Tensor, info: dict[str, Any]) -> None:
+    def backward_and_step(
+        self,
+        step: int,
+        loss: Tensor,
+        info: dict[str, Any],
+        *,
+        score_fn: Callable[[], Tensor] | None = None,
+        final: bool = False,
+    ) -> None:
         loss.backward()
+        if isinstance(self.strategy, ImprovedGSStrategy):
+            if self.strategy.should_step_optimizer(step) or final:
+                self.step_optimizers()
+                self.zero_grad()
+            scores = None
+            if self.strategy.needs_scores(self.state, step):
+                if score_fn is None:
+                    raise ValueError(
+                        "Improved-GS requires EAS inference on refinement steps"
+                    )
+                scores = score_fn()
+            self.post_backward(step, info, scores=scores)
+            return
+        self.step_optimizers()
+        self.post_backward(step, info)
+
+    def step_optimizers(self) -> None:
+        """Update parameters without clearing gradients or refining the model."""
         for optimizer in self.optimizers.values():
             optimizer.step()
+
+    def post_backward(self, step: int, info: dict[str, Any], **kwargs: Any) -> None:
+        """Run strategy updates, optionally after method-specific inference.
+
+        Split from optimizer updates for Improved-GS's MU/EAS. The ordinary
+        demos can keep using ``backward_and_step`` unchanged.
+        """
         args = (self.gaussian.gauss_params, self.optimizers, self.state, step, info)
         if isinstance(self.strategy, MCMCStrategy):
             self.strategy.step_post_backward(
-                *args, lr=self.optimizers["means"].param_groups[0]["lr"]
+                *args, lr=self.optimizers["means"].param_groups[0]["lr"], **kwargs
             )
         else:
-            self.strategy.step_post_backward(*args, packed=False)
+            self.strategy.step_post_backward(*args, packed=False, **kwargs)
 
     @torch.no_grad()
     def log(

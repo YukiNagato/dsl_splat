@@ -4,6 +4,7 @@
 # Modified for DSL Splat: selected helpers/imports removed and the optimizer
 # helper renamed; opacity resets optionally account for a 3D Gaussian filter.
 # Incomplete MCMC relocation moved to mcmc_ops.py and implemented with Warp.
+# Row removal also preserves frozen parameters' requires_grad flags.
 # See README.md and LICENSE in this directory for source and license details.
 
 from typing import Callable, Dict, List, Union
@@ -188,7 +189,7 @@ def remove(
     sel = torch.where(~mask)[0]
 
     def param_fn(name: str, p: Tensor) -> Tensor:
-        return torch.nn.Parameter(p[sel])
+        return torch.nn.Parameter(p[sel], requires_grad=p.requires_grad)
 
     def optimizer_fn(key: str, v: Tensor) -> Tensor:
         return v[sel]

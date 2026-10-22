@@ -2,14 +2,16 @@
 
 Uses the native RaDe renderer's depth/normals, explicit camera-dependent 3D
 filtering, cosine normal consistency and the shared Warp patch-NCC supervision.
-The demo uses DefaultStrategy and rendered neighbor depth sampling; it does
-not reproduce upstream's GOF strategy, appearance network or sample_depth API.
+The demo supports DefaultStrategy or Improved-GS and rendered neighbor depth
+sampling; it does not reproduce upstream's GOF strategy, appearance network
+or sample_depth API.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from pathlib import Path
 import random
+from typing import Literal, Sequence
 
 import torch
 from torch import Tensor
@@ -18,12 +20,23 @@ import tyro
 
 from dsl_splat import rade
 from dsl_splat.pgsr import MultiViewLoss, multiview_geometry
+from dsl_splat.statistics import StatisticsRequest, WeightedContributionSum
 
 if __package__:
     from .colmap_dataset import ImageFrame
     from .model import GaussianContainer
     from .multiview import MultiViewDataset, save_debug_image
-    from .rade import RaDeStrategy, compute_3d_filter, geometry_maps
+    from .rade import (
+        RaDeStrategy,
+        RaDeImprovedGSStrategy,
+        compute_3d_filter,
+        geometry_maps,
+    )
+    from .improvedgs import (
+        ImprovedGSOptions,
+        ImprovedGSScorer,
+        improved_strategy_options,
+    )
     from .training import (
         Trainer,
         TrainConfig,
@@ -36,7 +49,17 @@ else:
     from colmap_dataset import ImageFrame
     from model import GaussianContainer
     from multiview import MultiViewDataset, save_debug_image
-    from rade import RaDeStrategy, compute_3d_filter, geometry_maps
+    from rade import (
+        RaDeStrategy,
+        RaDeImprovedGSStrategy,
+        compute_3d_filter,
+        geometry_maps,
+    )
+    from improvedgs import (
+        ImprovedGSOptions,
+        ImprovedGSScorer,
+        improved_strategy_options,
+    )
     from training import (
         Trainer,
         TrainConfig,
@@ -51,6 +74,8 @@ else:
 class Config(TrainConfig):
     debug_save_path: Path | None = None
     sh_degree_interval: int = 1000
+    strategy_type: Literal["default", "improvedgs"] = "default"
+    improvedgs: ImprovedGSOptions = field(default_factory=ImprovedGSOptions)
 
     # Frontend 3D filter and rasterizer 2D dilation are separate controls.
     filter_3d: bool = True
@@ -114,6 +139,7 @@ def render_frame(
     absgrad: bool = True,
     kernel_size: float = 0.0,
     near_plane: float = 0.2,
+    statistics: Sequence[StatisticsRequest] = (),
 ) -> rade.RasterizationResult:
     params = gaussian.gauss_params
     scales = params["scales"].exp()
@@ -139,6 +165,7 @@ def render_frame(
         near_plane=near_plane,
         packed=False,
         absgrad=absgrad,
+        statistics=statistics,
         **attributes,
     )
 
@@ -153,16 +180,30 @@ def main(cfg: Config) -> None:
         multi_view_min_dis=cfg.multi_view_min_dis,
         multi_view_max_dis=cfg.multi_view_max_dis,
     )
-    strategy = RaDeStrategy(
-        dataset.frames,
-        filter_3d=cfg.filter_3d,
-        near_plane=cfg.near_plane,
-        reset_opacity=cfg.reset_opacity,
-        **default_strategy_options(cfg, dataset),
+    strategy = (
+        RaDeImprovedGSStrategy(
+            dataset.frames,
+            filter_3d=cfg.filter_3d,
+            near_plane=cfg.near_plane,
+            **improved_strategy_options(cfg.improvedgs, cfg, dataset),
+        )
+        if cfg.strategy_type == "improvedgs"
+        else RaDeStrategy(
+            dataset.frames,
+            filter_3d=cfg.filter_3d,
+            near_plane=cfg.near_plane,
+            reset_opacity=cfg.reset_opacity,
+            **default_strategy_options(cfg, dataset),
+        )
     )
     trainer = Trainer(cfg, dataset, strategy)
     gaussian, device, state = trainer.gaussian, trainer.device, trainer.state
     strategy.refresh_filter(gaussian.gauss_params, state)
+    scorer = (
+        ImprovedGSScorer.from_options(dataset, cfg.improvedgs)
+        if cfg.strategy_type == "improvedgs"
+        else None
+    )
 
     maps_fn = compile_geometry(geometry_maps, cfg.compile_geometry)
     multi_view = MultiViewLoss(
@@ -172,7 +213,7 @@ def main(cfg: Config) -> None:
         geometry_fn=compile_geometry(multiview_geometry, cfg.compile_geometry),
     )
     for step in tqdm(range(1, cfg.train_iters + 1), desc="train"):
-        trainer.zero_grad()
+        trainer.begin_step()
         progress = (step - 1) / max(cfg.train_iters - 1, 1)
         trainer.optimizers["means"].param_groups[0]["lr"] = math.exp(
             math.log(cfg.means_lr) * (1 - progress)
@@ -181,16 +222,23 @@ def main(cfg: Config) -> None:
         index, frame = trainer.sample_frame()
         degree = trainer.sh_degree(step)
 
-        def render(camera: ImageFrame):
+        def render(camera: ImageFrame, statistics: Sequence[StatisticsRequest] = ()):
             return render_frame(
                 gaussian,
                 camera,
                 state["filter_3d"] if cfg.filter_3d else None,
                 degree,
-                absgrad=cfg.absgrad,
+                absgrad=cfg.absgrad
+                and not statistics
+                and (scorer is None or step < cfg.refine_stop_iter),
                 kernel_size=cfg.kernel_size,
                 near_plane=cfg.near_plane,
+                statistics=statistics,
             )
+
+        def score_view(camera: ImageFrame, request: WeightedContributionSum):
+            scored = render(camera, (request,))
+            return scored.statistics["eas"][0], (scored.radii[0] > 0).all(-1)
 
         result = render(frame)
         info = result.meta
@@ -253,7 +301,19 @@ def main(cfg: Config) -> None:
                 depth_key="median_depth",
             )
         loss = sum(losses.values())
-        trainer.backward_and_step(step, loss, info)
+        trainer.backward_and_step(
+            step,
+            loss,
+            info,
+            score_fn=(
+                None
+                if scorer is None
+                else lambda: scorer.collect(
+                    step, len(gaussian.gauss_params["means"]), device, score_view
+                )
+            ),
+            final=step == cfg.train_iters,
+        )
         if step >= cfg.refine_stop_iter and step % cfg.filter_update_every == 0:
             strategy.refresh_filter(gaussian.gauss_params, state)
         trainer.log(step, loss, rgb, gt, losses=losses, first=step == 1)

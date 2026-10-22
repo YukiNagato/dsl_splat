@@ -3,8 +3,6 @@
 """MCMC numerical operations and Gaussian/optimizer population updates."""
 
 import math
-from collections.abc import Mapping
-from typing import TypeAlias
 
 import torch
 from torch import Tensor, nn
@@ -13,9 +11,7 @@ import warp as wp
 from ..runtime.interop import current_stream
 from . import _mcmc_kernels as kernels
 from .ops import update_param_with_optimizer
-
-Params: TypeAlias = dict[str, nn.Parameter] | nn.ParameterDict
-Optimizers: TypeAlias = Mapping[str, torch.optim.Optimizer]
+from .base import Params, Optimizers
 
 
 def binomial_table() -> Tensor:

@@ -18,7 +18,7 @@ from ..cameras import validate_camera_options
 from ..inputs import batch_item, normalize_inputs
 from ..primitives.spherical_harmonics import spherical_harmonics
 from ..runtime.dispatch import FrameBindings
-from ..statistics import StatisticsRequest
+from ..statistics import StatisticsRequest, prepare_statistics
 from ..training import prepare_training_metadata
 
 
@@ -81,8 +81,6 @@ def rasterize(
     """
     if not math.isfinite(kernel_size) or kernel_size < 0:
         raise ValueError("kernel_size must be finite and nonnegative")
-    if statistics:
-        raise NotImplementedError("RaDe-GS contribution statistics are not implemented")
     validate_camera_options(width, height, near_plane, far_plane, radius_clip)
     if (features is None) == (sh_coeffs is None):
         raise ValueError("provide exactly one of features or sh_coeffs")
@@ -209,7 +207,20 @@ def rasterize(
         supports_means2d_grad=True,
         screen_gradient_mode="projected_mean",
     )
-    statistics_outputs: dict[str, Tensor] = {}
+    prepared_stats, statistics_outputs = (
+        prepare_statistics(
+            statistics,
+            batch_dims=layout.batch_dims,
+            batch_count=layout.batch_count,
+            cameras=layout.cameras,
+            n=layout.n,
+            width=width,
+            height=height,
+            device=layout.device,
+        )
+        if statistics
+        else ([], {})
+    )
     images = []
     for i, frame in enumerate(frames):
         screen = (
@@ -234,6 +245,7 @@ def rasterize(
             frame.config,
             frame.bindings,
             training.absolute_targets[i],
+            prepared_stats[i] if prepared_stats else None,
             torch.is_grad_enabled(),
         )
         images.append(image)
